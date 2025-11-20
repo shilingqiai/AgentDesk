@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: ticket-dispatch
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PROVIDER=${MODEL_PROVIDER:-qwen}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL=${LLM_MODEL}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-qwen}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - DATABASE_URL=sqlite:///./data/ticket_dispatch.db
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: ticket-dispatch-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  redis_data:
