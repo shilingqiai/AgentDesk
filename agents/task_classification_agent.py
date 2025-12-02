@@ -53,8 +53,8 @@ class TaskClassificationAgent:
         self.state = self.state_manager.state
 
     def _initialize_llm(self):
-        """初始化通用聊天模型"""
-        return create_chat_model(temperature=0)
+        """初始化分类专用模型（使用轻量快速的 qwen-mt-flash）"""
+        return create_chat_model(model_type="router", temperature=0)
     
     def _setup_callbacks(self):
         """设置Agent的回调函数"""

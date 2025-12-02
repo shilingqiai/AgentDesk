@@ -1,99 +1,67 @@
-"""Model provider factory for chat LLMs and embeddings.
+"""模型提供商工厂
 
-Supports Azure OpenAI and OpenAI-compatible providers such as Qwen,
-DeepSeek, Zhipu, and OpenAI by switching environment variables.
+基于 DashScope (阿里云百炼) OpenAI 兼容接口，支持切换其他兼容提供商。
+
+使用方式:
+    from config.model_provider import create_chat_model, create_embedding_model
+
+    llm = create_chat_model()              # 使用 LLM_MODEL 环境变量
+    router_llm = create_chat_model("router")  # 使用 ROUTER_MODEL（轻量快速模型）
+    embeddings = create_embedding_model()
 """
 
 from __future__ import annotations
 
 import os
-
 from dotenv import load_dotenv
-from langchain_openai import (
-    AzureChatOpenAI,
-    AzureOpenAIEmbeddings,
-    ChatOpenAI,
-    OpenAIEmbeddings,
-)
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import SecretStr
 
 load_dotenv()
 
-
-CHAT_PROVIDERS = {"openai", "qwen", "deepseek", "zhipu", "openai-compatible"}
-EMBEDDING_PROVIDERS = {"openai", "qwen", "zhipu", "openai-compatible"}
-
-
-def _env(name: str, default: str | None = None) -> str | None:
-    value = os.getenv(name)
-    return value if value not in (None, "") else default
+# 默认 base_url — 阿里云 DashScope 兼容接口
+DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-def get_model_provider() -> str:
-    """Return configured provider, defaulting to Azure for backward compatibility."""
-    return (_env("MODEL_PROVIDER", "azure") or "azure").strip().lower()
+def get_api_key() -> str:
+    """获取 API Key"""
+    return os.getenv("DASHSCOPE_API_KEY", "")
 
 
-def create_chat_model(temperature: float = 0):
-    """Create a chat model from environment configuration.
+def get_base_url() -> str:
+    """获取 LLM Base URL"""
+    return os.getenv("LLM_BASE_URL", DASHSCOPE_BASE_URL)
 
-    Azure-compatible env vars:
-        MODEL_PROVIDER=azure
-        AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT,
-        AZURE_OPENAI_VERSION
 
-    OpenAI-compatible env vars:
-        MODEL_PROVIDER=qwen|deepseek|zhipu|openai|openai-compatible
-        LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+def create_chat_model(model_type: str = "main", temperature: float = 0):
+    """创建聊天模型
+
+    Args:
+        model_type: "main" 使用 LLM_MODEL（默认 qwen-max）
+                    "router" 使用 ROUTER_MODEL（默认 qwen-mt-flash，轻量快速）
+        temperature: 温度参数（0=确定性, 1=创造性）
     """
-    provider = get_model_provider()
+    if model_type == "router":
+        model = os.getenv("ROUTER_MODEL", "qwen-mt-flash")
+    else:
+        model = os.getenv("LLM_MODEL", "qwen-max")
 
-    if provider == "azure":
-        return AzureChatOpenAI(
-            azure_deployment=_env("AZURE_OPENAI_DEPLOYMENT"),
-            api_version=_env("AZURE_OPENAI_VERSION"),
-            temperature=temperature,
-            azure_endpoint=_env("AZURE_OPENAI_ENDPOINT"),
-            api_key=SecretStr(_env("AZURE_OPENAI_API_KEY", "") or ""),
-        )
-
-    if provider in CHAT_PROVIDERS:
-        return ChatOpenAI(
-            model=_env("LLM_MODEL", "qwen-plus") or "qwen-plus",
-            api_key=SecretStr(_env("LLM_API_KEY", "") or ""),
-            base_url=_env("LLM_BASE_URL"),
-            temperature=temperature,
-        )
-
-    raise ValueError(
-        f"Unsupported MODEL_PROVIDER={provider!r}. "
-        "Use azure, qwen, deepseek, zhipu, openai, or openai-compatible."
+    return ChatOpenAI(
+        model=model,
+        api_key=SecretStr(get_api_key()),
+        base_url=get_base_url(),
+        temperature=temperature,
     )
 
 
 def create_embedding_model():
-    """Create an embedding model from environment configuration."""
-    provider = (_env("EMBEDDING_PROVIDER") or get_model_provider()).strip().lower()
+    """创建 Embedding 模型（默认 text-embedding-v4）"""
+    model = os.getenv("EMBEDDING_MODEL", "text-embedding-v4")
+    base_url = os.getenv("EMBEDDING_BASE_URL", DASHSCOPE_BASE_URL)
 
-    if provider == "azure":
-        return AzureOpenAIEmbeddings(
-            azure_deployment=_env("AZURE_OPENAI_DEPLOYMENT_EMBEDDING"),
-            api_key=SecretStr(_env("AZURE_OPENAI_API_KEY", "") or ""),
-            api_version=_env("AZURE_OPENAI_EMBEDDING_VERSION", "2023-05-15"),
-            azure_endpoint=_env("AZURE_OPENAI_ENDPOINT_EMBEDDING"),
-        )
-
-    if provider in EMBEDDING_PROVIDERS:
-        return OpenAIEmbeddings(
-            model=_env("EMBEDDING_MODEL", "text-embedding-v3") or "text-embedding-v3",
-            api_key=SecretStr(_env("EMBEDDING_API_KEY") or _env("LLM_API_KEY", "") or ""),
-            base_url=_env("EMBEDDING_BASE_URL") or _env("LLM_BASE_URL"),
-            # OpenAI-compatible providers like DashScope (Qwen) only accept raw
-            # strings; disable token-id batching to send plain text.
-            check_embedding_ctx_length=False,
-        )
-
-    raise ValueError(
-        f"Unsupported EMBEDDING_PROVIDER={provider!r}. "
-        "Use azure, qwen, zhipu, openai, or openai-compatible."
+    return OpenAIEmbeddings(
+        model=model,
+        api_key=SecretStr(get_api_key()),
+        base_url=base_url,
+        check_embedding_ctx_length=False,
     )
