@@ -7,25 +7,23 @@
 3. 提供手动触发推荐功能
 """
 
-import asyncio
-import schedule
-import time
-import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 import logging
 
 logger = logging.getLogger(__name__)
 
+
 class RecommendationService:
-    """推荐调度服务类"""
-    
+    """推荐调度服务类（基于 APScheduler）"""
+
     def __init__(self):
-        # 延迟导入避免循环依赖
         self._behavior_agent = None
-        self.is_running = False
-        self.scheduler_thread = None
-    
+        self.scheduler: Optional[BackgroundScheduler] = None
+
     @property
     def behavior_agent(self):
         """懒加载用户行为服务"""
@@ -33,15 +31,13 @@ class RecommendationService:
             from services.user_behavior_service import UserBehaviorService
             self._behavior_agent = UserBehaviorService()
         return self._behavior_agent
-    
-    def generate_recommendations_job(self) -> Optional[List[Dict[str, Any]]]:
+
+    def generate_recommendations_job(self):
         """定时生成推荐的任务"""
         try:
             logger.info("开始执行定时推荐生成任务...")
-            # 通过用户行为服务分析用户模式并生成推荐
-            # TODO: 实现基于用户行为的推荐逻辑
             recommendations = []
-            
+
             if recommendations:
                 logger.info(f"成功生成 {len(recommendations)} 条推荐:")
                 for rec in recommendations:
@@ -50,80 +46,71 @@ class RecommendationService:
             else:
                 logger.info("本次没有生成新的推荐")
                 return None
-                
+
         except Exception as e:
             logger.error(f"定时推荐生成任务失败: {str(e)}")
             return None
-    
+
     def start_scheduler(self) -> bool:
         """启动定时任务调度器"""
-        if self.is_running:
+        if self.scheduler and self.scheduler.running:
             logger.warning("调度器已经在运行中")
             return False
-        
+
         try:
-            # 设置定时任务
-            # 每天9点、14点、19点检查并生成推荐
-            schedule.every().day.at("09:00").do(self.generate_recommendations_job)
-            schedule.every().day.at("14:00").do(self.generate_recommendations_job)
-            schedule.every().day.at("19:00").do(self.generate_recommendations_job)
-            
-            # 每2小时检查一次（用于测试，实际可根据需要调整）
-            schedule.every(2).hours.do(self.generate_recommendations_job)
-            
-            self.is_running = True
-            
-            def run_scheduler():
-                logger.info("推荐调度器已启动")
-                while self.is_running:
-                    schedule.run_pending()
-                    time.sleep(60)  # 每分钟检查一次
-                logger.info("推荐调度器已停止")
-            
-            # 在后台线程中运行调度器
-            self.scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-            self.scheduler_thread.start()
+            self.scheduler = BackgroundScheduler(daemon=True)
+
+            # 每天 9:00、14:00、19:00 检查并生成推荐
+            self.scheduler.add_job(
+                self.generate_recommendations_job,
+                CronTrigger(hour="9,14,19", minute="0"),
+                id="daily_recommendation",
+                name="每日推荐生成"
+            )
+
+            # 每2小时检查一次
+            self.scheduler.add_job(
+                self.generate_recommendations_job,
+                IntervalTrigger(hours=2),
+                id="interval_check",
+                name="定期推荐检查"
+            )
+
+            self.scheduler.start()
+            logger.info("推荐调度器已启动（APScheduler）")
             return True
-            
+
         except Exception as e:
             logger.error(f"启动推荐调度器失败: {str(e)}")
             return False
-        
+
     def stop_scheduler(self) -> bool:
         """停止定时任务调度器"""
         try:
-            self.is_running = False
-            schedule.clear()
+            if self.scheduler and self.scheduler.running:
+                self.scheduler.shutdown(wait=False)
+                self.scheduler = None
             logger.info("推荐调度器已停止")
             return True
         except Exception as e:
             logger.error(f"停止推荐调度器失败: {str(e)}")
             return False
-    
+
     def run_immediate_check(self) -> Optional[List[Dict[str, Any]]]:
         """立即执行一次推荐检查（用于测试或手动触发）"""
         logger.info("执行立即推荐检查...")
         return self.generate_recommendations_job()
-    
+
     def get_status(self) -> Dict[str, Any]:
         """获取调度器状态"""
+        jobs = []
+        if self.scheduler:
+            jobs = [
+                {"id": j.id, "name": j.name, "next_run": str(j.next_run_time)}
+                for j in self.scheduler.get_jobs()
+            ]
         return {
-            "is_running": self.is_running,
-            "thread_alive": self.scheduler_thread.is_alive() if self.scheduler_thread else False,
-            "next_job": str(schedule.next_run()) if schedule.jobs else None,
-            "total_jobs": len(schedule.jobs)
+            "is_running": self.scheduler.running if self.scheduler else False,
+            "jobs": jobs,
+            "total_jobs": len(jobs),
         }
-
-# 测试用的手动运行函数
-if __name__ == "__main__":
-    print("启动推荐调度器测试...")
-    service = RecommendationService()
-    service.start_scheduler()
-    
-    try:
-        # 运行10分钟用于测试
-        time.sleep(600)
-    except KeyboardInterrupt:
-        print("收到中断信号，停止调度器...")
-    finally:
-        service.stop_scheduler()

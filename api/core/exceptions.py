@@ -35,5 +35,5 @@ async def general_exception_handler(request: Request, exc: Exception):
     
     return JSONResponse(
         status_code=500,
-        content={"error": "服务器内部错误"}
+        content={"error": "服务器内部错误", "detail": str(exc), "type": type(exc).__name__}
     )
