@@ -70,27 +70,17 @@ class ConsultantAgent:
     async def consult_stream(self, user_input: str):
         """
         流式输出咨询结果
-        
+
         这是主要的咨询入口点，协调各个组件完成咨询流程
+        注意：主分类器已完成意图识别，这里不再重复判断，直接执行RAG检索
         """
-        # 1. 检查是否与咨询相关
-        is_consultation = await self.consultation_classifier.is_consultation_related(user_input)
-        
-        if not is_consultation:
-            # 2. 处理与咨询无关的请求
-            async for token in self.consultation_processor.handle_unrelated_request(
-                user_input, self.unrelated_callback, self.shared_state
-            ):
-                yield token
-            return
-        
-        # 3. 处理咨询相关的请求
+        # 直接处理知识咨询（主分类器已经判断过意图）
         async for token in self.consultation_processor.process_consultation_stream(
             user_input, self.session_id
         ):
             yield token
-        
-        # 4. 重置状态
+
+        # 重置状态
         self._reset_state_after_consultation()
 
     def _reset_state_after_consultation(self):
