@@ -48,11 +48,7 @@ class ConsultationProcessor:
     
     async def handle_unrelated_request(self, user_input: str, unrelated_callback, shared_state) -> AsyncGenerator[str, None]:
         """处理与咨询无关的请求"""
-        # 重置状态
-        if shared_state:
-            from config.constants import StateEnum
-            shared_state.value = StateEnum.CLASSIFY
-        
+        # 状态管理已由编排器接管
         yield self.response_generator.create_unrelated_message()
         
         # 转给回调处理
@@ -61,22 +57,10 @@ class ConsultationProcessor:
                 yield token
     
     async def _record_consultation_behavior(self, user_input: str, knowledge_docs: list, session_id: str):
-        """记录咨询行为"""
-        try:
-            from agents.user_behavior_agent import UserBehaviorAgent
-            behavior_agent = UserBehaviorAgent()
-            
-            action_data = {
-                'question': user_input,
-                'knowledge_docs_used': len(knowledge_docs),
-                'categories': list(set(doc.get('category', 'unknown') for doc in knowledge_docs)) if knowledge_docs else []
-            }
-            
-            behavior_agent.record_behavior(
-                action_type='consultation',
-                action_data=action_data,
-                session_id=session_id
-            )
-            
-        except Exception as behavior_error:
-            print(f"记录咨询行为失败：{behavior_error}")
+        """记录咨询行为（轻量日志）"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"咨询记录: session={session_id}, "
+            f"检索到 {len(knowledge_docs) if knowledge_docs else 0} 条知识"
+        )

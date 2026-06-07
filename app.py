@@ -1,116 +1,153 @@
 """
-FastAPI应用程序
+FastAPI应用程序 — 企业员工AI服务台
 
-主应用程序入口，配置中间件、路由和异常处理
-自动初始化知识库和技师数据
+启动方式:
+  python app.py                  # 默认 all 模式 (web + feishu)
+  python app.py --mode web       # 仅 Web 前端 + API
+  python app.py --mode feishu    # 仅飞书 WS 长连接
+  python app.py --mode all       # 两者都启动
+
+环境变量:
+  SERVICE_MODE=web|feishu|all    （命令行 --mode 优先）
+  FEISHU_APP_ID / FEISHU_APP_SECRET
 """
+from __future__ import annotations
+
+import sys
+import os
+import logging
+import argparse
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from services.knowledge_service import KnowledgeService
-from services.technician_service import TechnicianService
-from services.recommendation_service import RecommendationService
-from typing import List, Optional
-import logging
-import asyncio
 
-# 导入路由
-from api import api_routers
-from api.core.exceptions import api_exception_handler, general_exception_handler, BusinessException
-from web import router as web_router
-from config.settings import settings
-
-# 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Pydantic模型
-from pydantic import BaseModel
+# 飞书 Bot Handler（全局实例）
+_feishu_handler = None
 
-class KnowledgeRequest(BaseModel):
-    content: str
-    category: str
-    keywords: List[str] = []
 
-class SearchRequest(BaseModel):
-    query: str
-    top_k: int = 5
-    category: Optional[str] = None
+def parse_mode() -> str:
+    """解析启动模式: 命令行 > SERVICE_MODE 环境变量 > 默认 all"""
+    if "--mode" in sys.argv:
+        idx = sys.argv.index("--mode")
+        if idx + 1 < len(sys.argv):
+            mode = sys.argv[idx + 1]
+        else:
+            mode = "all"
+        # 从 sys.argv 中移除，避免 uvicorn 误解析
+        del sys.argv[idx:idx + 2]
+        return mode
+    return os.getenv("SERVICE_MODE", "all").lower()
+
+
+SERVICE_MODE = parse_mode()
+
 
 async def initialize_system():
-    """系统启动时自动初始化"""
+    """系统启动时初始化"""
+    global _feishu_handler
+
     try:
-        logger.info("🚀 正在初始化智能工单调度系统...")
-        
-        # 初始化知识库服务
-        logger.info("📚 初始化知识库服务...")
-        knowledge_service = KnowledgeService()
-        await knowledge_service.initialize()
-        
-        # 初始化技师服务
-        logger.info("🖥️ 初始化工程师服务...")
-        technician_service = TechnicianService()
-        technician_service.initialize_default_technicians()
-        
-        # 初始化推荐服务
-        logger.info("🎯 启动推荐调度服务...")
-        recommendation_service = RecommendationService()
-        if recommendation_service.start_scheduler():
-            logger.info("✅ 推荐调度服务启动成功")
-        else:
-            logger.warning("⚠️ 推荐调度服务启动失败")
-        
+        mode_label = {"web": "Web 前端模式", "feishu": "飞书 Bot 模式", "all": "完整模式"}
+        logger.info(f"🚀 正在初始化企业员工AI服务台... 模式: {mode_label.get(SERVICE_MODE, SERVICE_MODE)}")
+
+        # 知识库（web / all 模式需要）
+        if SERVICE_MODE in ("web", "all"):
+            logger.info("📚 初始化知识库...")
+            from services.knowledge_service import KnowledgeService
+            knowledge_service = KnowledgeService()
+            await knowledge_service.initialize()
+
+        # 飞书 WebSocket 长连接（feishu / all 模式）
+        if SERVICE_MODE in ("feishu", "all"):
+            if os.getenv("FEISHU_APP_ID") and os.getenv("FEISHU_APP_SECRET"):
+                logger.info("🔗 启动飞书 WebSocket 长连接...")
+                from integrations.feishu.bot_handler import FeishuBotHandler
+                _feishu_handler = FeishuBotHandler()
+                await _feishu_handler.start_ws()
+            else:
+                logger.warning(
+                    "⚠️  飞书未配置，跳过。"
+                    "在 .env 或系统环境变量设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET"
+                )
+
         logger.info("✅ 系统初始化完成！")
-        
     except Exception as e:
         logger.error(f"❌ 系统初始化失败: {e}")
         raise
 
+
+async def shutdown_system():
+    """系统关闭时清理"""
+    global _feishu_handler
+    if _feishu_handler:
+        await _feishu_handler.stop_ws()
+        logger.info("🔌 飞书 WebSocket 连接已关闭")
+
+
 def create_app() -> FastAPI:
     """创建FastAPI应用实例"""
-    
     app = FastAPI(
-        title="智能工单调度AI代理",
-        description="提供工单智能调度、知识自服务、效能分析等功能的API服务",
-        version="1.0.0",
+        title="企业员工AI服务台",
+        description="Copilot Studio 多Agent编排 — IT自助、HR咨询、行政服务",
+        version="2.0.0",
         docs_url="/docs",
-        redoc_url="/redoc"
+        redoc_url="/redoc",
     )
 
-    # 添加CORS中间件
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # 生产环境中应该设置具体的域名
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # 注册异常处理器
+    from api.core.exceptions import api_exception_handler, general_exception_handler, BusinessException
     app.add_exception_handler(BusinessException, api_exception_handler)
     app.add_exception_handler(Exception, general_exception_handler)
 
-    # 注册API路由
+    # API 路由（所有模式都需要）
+    from api import api_routers
     for router in api_routers:
         app.include_router(router)
 
-    # 注册Web界面路由
-    app.include_router(web_router)
+    # Web 前端路由（web / all 模式）
+    if SERVICE_MODE in ("web", "all"):
+        from web import router as web_router
+        app.include_router(web_router)
+        app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
-    # 静态文件
-    app.mount("/static", StaticFiles(directory="web/static"), name="static")
+    # 飞书集成路由（feishu / all 模式）
+    if SERVICE_MODE in ("feishu", "all"):
+        from integrations.feishu.bot_handler import create_feishu_router
+        app.include_router(create_feishu_router())
 
-    # 添加启动事件
     @app.on_event("startup")
     async def startup_event():
-        """应用启动时自动初始化系统"""
         await initialize_system()
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        await shutdown_system()
 
     return app
 
-# 创建应用实例
+
 app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+
+    # web 模式默认 8001，feishu 模式默认 8002
+    default_port = 8001 if SERVICE_MODE != "feishu" else 8002
+
+    parser = argparse.ArgumentParser(description="企业员工AI服务台")
+    parser.add_argument("--port", type=int, default=default_port, help=f"监听端口 (默认 {default_port})")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="监听地址")
+    args, _ = parser.parse_known_args()
+
+    logger.info(f"启动模式: {SERVICE_MODE} | 端口: {args.port}")
+    uvicorn.run(app, host=args.host, port=args.port)

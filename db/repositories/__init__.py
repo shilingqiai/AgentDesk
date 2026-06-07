@@ -1,18 +1,8 @@
 """
-Repositories Module
+数据仓库模块
 
-数据访问对象模块，包含：
-- 技师数据仓库
-- 知识库数据仓库  
-- 用户行为数据仓库
+提供知识库的数据访问封装。
 """
-
-from .technician_repository import TechnicianRepository
 from .knowledge_repository import KnowledgeRepository
-from .user_behavior_repository import UserBehaviorRepository
 
-__all__ = [
-    'TechnicianRepository',
-    'KnowledgeRepository',
-    'UserBehaviorRepository'
-]
+__all__ = ['KnowledgeRepository']

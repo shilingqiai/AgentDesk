@@ -1,35 +1,15 @@
 """
-业务服务层模块
+业务服务层 — 企业员工AI服务台
 
-包含：
-- 知识库服务
-- 技师服务  
-- 预约服务
-- 用户行为服务
-- 推荐调度服务
-- 文本嵌入工具
+提供知识库管理、文本向量化、缓存等核心服务。
 """
-
-from .text_embedding import (
-    embed_input,
-    find_best_match_indices,
-    save_technician_embeddings,
-    load_technician_embeddings
-)
+from .text_embedding import embed_input, find_best_match_indices
 from .knowledge_service import KnowledgeService
-from .technician_service import TechnicianService
-from .appointment_service import AppointmentService
-from .user_behavior_service import UserBehaviorService
-from .recommendation_service import RecommendationService
+from .cache_service import CacheService
 
 __all__ = [
     'embed_input',
     'find_best_match_indices',
-    'save_technician_embeddings',
-    'load_technician_embeddings',
     'KnowledgeService',
-    'TechnicianService',
-    'AppointmentService',
-    'UserBehaviorService',
-    'RecommendationService'
+    'CacheService',
 ]

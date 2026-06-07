@@ -1,12 +1,10 @@
-from enum import Enum
-busy_periods_dict = {}  # { engineer_id: [ {"start": "...", "end": "..."} ] }
+"""
+应用程序常量
 
-class StateEnum(Enum):
-    CLASSIFY = "classify"
-    APPOINTMENT = "appointment"
-    CONSULT = "consult"
-    OTHER = "other"
-    
-class SharedState:
-    def __init__(self):
-        self.value = StateEnum.CLASSIFY
+仅保留业务数据常量（如忙碌时段配置）。
+状态管理已迁移到 agents/graph_workflow.py 的 TicketState。
+"""
+
+# 工程师忙碌时段配置
+# { engineer_id: [ {"start": "...", "end": "..."} ] }
+busy_periods_dict: dict = {}

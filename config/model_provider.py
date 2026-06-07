@@ -13,11 +13,11 @@
 from __future__ import annotations
 
 import os
-from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import SecretStr
 
-load_dotenv()
+# 环境变量由 config/settings.py (pydantic-settings) 统一管理
+# 加载优先级: 系统环境变量 > .env 文件 > 默认值
 
 # 默认 base_url — 阿里云 DashScope 兼容接口
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"

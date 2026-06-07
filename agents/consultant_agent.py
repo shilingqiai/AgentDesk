@@ -85,6 +85,5 @@ class ConsultantAgent:
 
     def _reset_state_after_consultation(self):
         """咨询完成后重置状态"""
-        if self.shared_state:
-            from config.constants import StateEnum
-            self.shared_state.value = StateEnum.CLASSIFY
+        # 状态管理已由编排器接管
+        pass
