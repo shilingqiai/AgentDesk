@@ -13,5 +13,12 @@
 https://open.feishu.cn/app
 """
 from .bot_handler import FeishuBotHandler, create_feishu_router
+from .card_builder import CardBuilder, make_step, map_stream_tokens_to_steps
 
-__all__ = ["FeishuBotHandler", "create_feishu_router"]
+__all__ = [
+    "FeishuBotHandler",
+    "create_feishu_router",
+    "CardBuilder",
+    "make_step",
+    "map_stream_tokens_to_steps",
+]

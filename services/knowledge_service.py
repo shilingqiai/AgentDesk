@@ -19,6 +19,7 @@ class KnowledgeService:
         self.index = None
         self.document_ids = []  # 维护文档ID与索引位置的映射
         self.initialized = False
+        self._dirty_count = 0   # 待重建计数（删除累积 > 10 时触发全量重建）
         
         # 默认知识库内容
         self.default_knowledge = [
@@ -195,25 +196,44 @@ class KnowledgeService:
             logger.error(f"搜索知识库失败: {e}")
             return []
 
+    async def _add_to_index(self, doc_id: int, embedding: list):
+        """增量添加单个向量到 FAISS 索引（不重建）"""
+        if self.index is None:
+            await self._build_vector_index()
+            return
+
+        emb_array = np.array([embedding]).astype('float32')
+        self.index.add(emb_array)
+        self.document_ids.append(doc_id)
+        logger.debug(f"增量添加向量: doc_id={doc_id}, index_size={self.index.ntotal}")
+
+    async def _rebuild_if_needed(self):
+        """当删除累积超过阈值时触发全量重建"""
+        self._dirty_count += 1
+        if self._dirty_count > 10:
+            logger.info(f"脏数据累积 {self._dirty_count} 条，触发全量索引重建")
+            await self._build_vector_index()
+            self._dirty_count = 0
+
     async def add_document(self, content: str, category: str, keywords: List[str] = None) -> bool:
-        """添加新文档"""
+        """添加新文档（增量更新索引）"""
         try:
             if keywords is None:
                 keywords = []
-            
+
             # 生成嵌入向量
             text_for_embedding = f"{content} {' '.join(keywords)}"
             embedding = embed_input(text_for_embedding)
-            
+
             # 保存到数据库
             doc_id = self.db.add_document(content, category, keywords, embedding)
-            
-            # 重建索引
-            await self._build_vector_index()
-            
+
+            # 增量添加到索引（不重建）
+            await self._add_to_index(doc_id, embedding)
+
             logger.info(f"成功添加文档 {doc_id}: {content[:50]}...")
             return True
-            
+
         except Exception as e:
             logger.error(f"添加文档失败: {e}")
             return False
@@ -228,39 +248,47 @@ class KnowledgeService:
                 current_doc = self.db.get_document(doc_id)
                 if not current_doc:
                     return False
-                
+
                 # 使用新值或保持原值
                 final_content = content if content is not None else current_doc['content']
                 final_keywords = keywords if keywords is not None else current_doc.get('keywords', [])
-                
+
                 # 生成新的嵌入向量
                 text_for_embedding = f"{final_content} {' '.join(final_keywords)}"
                 embedding = embed_input(text_for_embedding)
-            
+
             # 更新数据库
             success = self.db.update_document(doc_id, content, category, keywords, embedding)
-            
+
             if success and embedding is not None:
-                # 重建索引
-                await self._build_vector_index()
-            
+                # 内容变化 → 删除旧向量 + 增量添加新向量
+                if doc_id in self.document_ids:
+                    idx = self.document_ids.index(doc_id)
+                    self.document_ids.pop(idx)
+                    # FAISS 不支持直接删除，累积脏标记，定期重建
+                    await self._rebuild_if_needed()
+                await self._add_to_index(doc_id, embedding)
+
             return success
-            
+
         except Exception as e:
             logger.error(f"更新文档失败: {e}")
             return False
 
     async def delete_document(self, doc_id: int, soft_delete: bool = True) -> bool:
-        """删除文档"""
+        """删除文档（标记删除 + 延迟重建索引）"""
         try:
             success = self.db.delete_document(doc_id, soft_delete)
-            
+
             if success:
-                # 重建索引
-                await self._build_vector_index()
-            
+                # 从 document_ids 中移除（FAISS 不支持直接删除向量）
+                # 策略：标记为删除 + 累积到阈值时全量重建
+                if doc_id in self.document_ids:
+                    self.document_ids.remove(doc_id)
+                await self._rebuild_if_needed()
+
             return success
-            
+
         except Exception as e:
             logger.error(f"删除文档失败: {e}")
             return False

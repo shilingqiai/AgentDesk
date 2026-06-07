@@ -22,7 +22,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from agents.orchestrator import orchestrator
 from agents.graph_workflow import orchestration_runner
 from agents.orchestrator.agent_registry import agent_registry
 from agents.orchestrator.telemetry import telemetry

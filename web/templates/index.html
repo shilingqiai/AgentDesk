@@ -462,10 +462,11 @@
         .thinking {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 10px 14px;
-            font-size: 13px;
+            gap: 10px;
+            padding: 14px 18px;
+            font-size: 14px;
             color: var(--text-secondary);
+            animation: slideUp 0.3s ease;
         }
 
         .thinking-dots { display: flex; gap: 3px; }
@@ -481,6 +482,13 @@
         @keyframes bounce {
             0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
             30% { transform: translateY(-6px); opacity: 1; }
+        }
+
+        .thinking-text {
+            font-size: 13px;
+            color: var(--accent);
+            font-weight: 500;
+            transition: all 0.3s ease;
         }
 
         /* Human Review Card */
@@ -653,24 +661,21 @@
             <div class="sidebar-subtitle">Copilot Studio 多Agent编排</div>
         </div>
 
-        <!-- Orchestration Pipeline -->
+        <!-- Hub & Spoke Routing -->
         <div class="sidebar-section">
-            <div class="sidebar-section-title">编排流水线</div>
+            <div class="sidebar-section-title">Hub & Spoke 三轨道路由</div>
             <div class="pipeline" id="pipeline">
-                <div class="pipeline-step" data-step="classify">
-                    <span class="step-dot"></span> 意图分类
+                <div class="pipeline-step" data-track="route">
+                    <span class="step-dot"></span> 🔀 智能路由
                 </div>
-                <div class="pipeline-step" data-step="plan">
-                    <span class="step-dot"></span> 任务规划
+                <div class="pipeline-step" data-track="fast">
+                    <span class="step-dot"></span> 📚 极速通道 (80%)
                 </div>
-                <div class="pipeline-step" data-step="delegate">
-                    <span class="step-dot"></span> Agent委派
+                <div class="pipeline-step" data-track="action">
+                    <span class="step-dot"></span> ⚡ 动作通道 (15%)
                 </div>
-                <div class="pipeline-step" data-step="verify">
-                    <span class="step-dot"></span> 结果验证
-                </div>
-                <div class="pipeline-step" data-step="respond">
-                    <span class="step-dot"></span> 响应合成
+                <div class="pipeline-step" data-track="complex">
+                    <span class="step-dot"></span> 🧩 复杂通道 (5%)
                 </div>
             </div>
         </div>
@@ -683,20 +688,11 @@
             </div>
         </div>
 
-        <!-- Quick Links -->
+        <!-- Quick Links — 仅保留有效页面 -->
         <div class="sidebar-section" style="margin-top: auto;">
             <div class="sidebar-section-title">导航</div>
             <a href="/knowledge" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
                 <i class="fas fa-database"></i> 知识库管理
-            </a>
-            <a href="/technician" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-users"></i> 工程师状态
-            </a>
-            <a href="/technician_schedule" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-calendar-alt"></i> 值班排班
-            </a>
-            <a href="/user_behavior" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-chart-line"></i> 效能分析
             </a>
         </div>
     </aside>
@@ -849,19 +845,17 @@
     }
 
     // ============================================================
-    // Pipeline Visualization
+    // Pipeline Visualization — Hub & Spoke
     // ============================================================
-    function setPipelineStep(stepName) {
+    function setPipelineTrack(track) {
         const steps = document.querySelectorAll('.pipeline-step');
-        const order = ['classify', 'plan', 'delegate', 'verify', 'respond'];
-        const idx = order.indexOf(stepName);
-
         steps.forEach(s => {
             s.classList.remove('current', 'done');
-            const sIdx = order.indexOf(s.dataset.step);
-            if (sIdx === idx) s.classList.add('current');
-            else if (sIdx < idx) s.classList.add('done');
+            if (s.dataset.track === track) s.classList.add('current');
         });
+        // Mark "route" as done once we know the track
+        const routeStep = document.querySelector('[data-track="route"]');
+        if (routeStep && track) routeStep.classList.add('done');
     }
 
     function resetPipeline() {
@@ -976,21 +970,36 @@
         scrollToBottom();
     }
 
-    function showThinking() {
+    function showThinking(text) {
         hideWelcome();
         const div = document.createElement('div');
         div.className = 'thinking';
         div.id = 'thinking-indicator';
         div.innerHTML = `
             <div class="thinking-dots"><span></span><span></span><span></span></div>
-            AI Agent 正在处理...`;
+            <span class="thinking-text">${escapeHtml(text || 'AI Agent 思考中...')}</span>`;
         chatArea.appendChild(div);
+        scrollToBottom();
+    }
+
+    function updateThinking(text) {
+        const el = document.getElementById('thinking-indicator');
+        if (el) {
+            const textEl = el.querySelector('.thinking-text');
+            if (textEl) textEl.textContent = text;
+        } else {
+            showThinking(text);
+        }
         scrollToBottom();
     }
 
     function hideThinking() {
         const el = document.getElementById('thinking-indicator');
-        if (el) el.remove();
+        if (el) {
+            el.style.opacity = '0';
+            el.style.transition = 'opacity 0.25s';
+            setTimeout(() => el.remove(), 250);
+        }
     }
 
     function scrollToBottom() {
@@ -1006,21 +1015,27 @@
     }
 
     // ============================================================
-    // Streaming Chat
+    // Streaming Chat — Hub & Spoke with real-time token streaming
     // ============================================================
+
     async function sendMessage(text) {
         const input = text || userInput.value.trim();
         if (!input) return;
 
         userInput.value = '';
         sendBtn.disabled = true;
-        sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 处理中...';
+        sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 思考中...';
 
         addUserMessage(input);
-        addBotMessage();
-        showThinking();
         resetPipeline();
         resetAllAgentStatuses();
+        addDebugEntry('event', 'system', `输入: ${input.substring(0, 80)}`);
+
+        // Show simple thinking dots
+        showThinking('AI Agent 思考中...');
+
+        let botBubbleCreated = false;
+        let currentTrack = '';
 
         try {
             const res = await fetch('/chat/stream', {
@@ -1029,79 +1044,144 @@
                 body: JSON.stringify({ message: input, thread_id: threadId }),
             });
 
-            hideThinking();
-
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
-            let fullText = '';
-            let currentOrchPhase = '';
+            let buffer = '';
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                const chunk = decoder.decode(value, { stream: true });
-                fullText += chunk;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
 
-                // Process orchestration markers
-                const lines = chunk.split('\n');
                 for (const line of lines) {
                     const trimmed = line.trim();
                     if (!trimmed) continue;
 
-                    if (trimmed.startsWith('[ORCHESTRATOR]')) {
-                        const content = trimmed.replace('[ORCHESTRATOR]', '').trim();
-
-                        if (content.includes('分析您的需求')) {
-                            setPipelineStep('classify');
-                            addOrchStep('classify', '意图分类: 分析用户需求');
-                            addDebugEntry('event', 'orchestrator', '开始意图分类');
-                        } else if (content.includes('规划处理方案')) {
-                            setPipelineStep('plan');
-                            addOrchStep('plan', '任务规划: 制定执行计划');
-                            addDebugEntry('event', 'orchestrator', '制定任务规划');
-                        } else if (content.includes('调用专业Agent')) {
-                            setPipelineStep('delegate');
-                            addDebugEntry('event', 'orchestrator', '开始委派子Agent');
-                        } else if (content.includes('验证结果')) {
-                            setPipelineStep('verify');
-                            addOrchStep('verify', '结果验证: 检查Agent执行结果');
-                        } else if (content.includes('整理回复')) {
-                            setPipelineStep('respond');
-                            addOrchStep('respond', '响应合成: 生成最终回复');
+                    // --- Real-time stream tokens (token-by-token LLM output) ---
+                    if (trimmed.startsWith('[STREAM]')) {
+                        const content = trimmed.substring(8); // remove "[STREAM]"
+                        // First stream token → hide thinking, create bot bubble
+                        if (!botBubbleCreated) {
+                            hideThinking();
+                            addBotMessage();
+                            botBubbleCreated = true;
                         }
+                        addBotText(content);
+
+                    // --- Thinking state updates ---
+                    } else if (trimmed.startsWith('[THINKING]')) {
+                        const content = trimmed.replace('[THINKING]', '').trim();
+                        updateThinking(content);
+                        addDebugEntry('event', 'thinking', content);
+
+                    // --- Backward compat: old PROGRESS tag → update thinking ---
+                    } else if (trimmed.startsWith('[PROGRESS]')) {
+                        const content = trimmed.replace('[PROGRESS]', '').trim();
+                        updateThinking(content);
+                        addDebugEntry('event', 'progress', content);
+
+                    // --- Route result ---
+                    } else if (trimmed.startsWith('[ROUTE]')) {
+                        const content = trimmed.replace('[ROUTE]', '').trim();
+                        if (content.includes('极速')) currentTrack = 'fast';
+                        else if (content.includes('动作')) currentTrack = 'action';
+                        else if (content.includes('复杂')) currentTrack = 'complex';
+                        else if (content.includes('兜底')) currentTrack = 'fallback';
+                        setPipelineTrack(currentTrack);
+                        addOrchStep('classify', `路由: ${content}`);
+                        addDebugEntry('event', 'router', content);
+
+                    // --- Track entry ---
+                    } else if (trimmed.startsWith('[FAST]')) {
+                        currentTrack = 'fast';
+                        setPipelineTrack('fast');
+                        addOrchStep('classify', trimmed.replace('[FAST]', '').trim());
+                        addDebugEntry('event', 'fast_track', '进入极速通道');
+
+                    } else if (trimmed.startsWith('[ACTION]')) {
+                        currentTrack = 'action';
+                        setPipelineTrack('action');
+                        addOrchStep('delegate', trimmed.replace('[ACTION]', '').trim());
+                        addDebugEntry('event', 'action_track', '进入动作通道');
+
+                    } else if (trimmed.startsWith('[COMPLEX]')) {
+                        currentTrack = 'complex';
+                        setPipelineTrack('complex');
+                        addOrchStep('plan', trimmed.replace('[COMPLEX]', '').trim());
+                        addDebugEntry('event', 'complex_track', '进入复杂通道');
+
+                    } else if (trimmed.startsWith('[FALLBACK]')) {
+                        currentTrack = 'fallback';
+                        setPipelineTrack('fallback');
+                        addOrchStep('classify', trimmed.replace('[FALLBACK]', '').trim());
+                        addDebugEntry('event', 'fallback', '兜底模式');
+
+                    // --- Completion ---
+                    } else if (trimmed === '[DONE]') {
+                        addDebugEntry('event', 'system', '编排完成');
+
+                    // --- Backward compat: old tags ---
+                    } else if (trimmed.startsWith('[ORCHESTRATOR]')) {
+                        const content = trimmed.replace('[ORCHESTRATOR]', '').trim();
+                        updateThinking(content);
+                        addOrchStep('classify', content);
+                        addDebugEntry('event', 'orchestrator', content);
+
                     } else if (trimmed.startsWith('[AGENT:')) {
                         const match = trimmed.match(/\[AGENT:([^\]]+)\]\s*(.*)/);
                         if (match) {
-                            const agentId = match[1];
-                            const msg = match[2];
+                            const agentId = match[1], msg = match[2];
                             setAgentStatus(agentId, 'active');
                             addOrchStep('delegate', `${agentId}: ${msg}`);
                             addDebugEntry('agent', agentId, msg);
+                            updateThinking(`${agentId}: ${msg}`);
                         }
+
                     } else if (trimmed.startsWith('[DEBUG]')) {
-                        const content = trimmed.replace('[DEBUG]', '').trim();
-                        addDebugEntry('event', 'debug', content);
+                        addDebugEntry('event', 'debug', trimmed.replace('[DEBUG]', '').trim());
+
                     } else if (trimmed.startsWith('[ERROR]')) {
                         const content = trimmed.replace('[ERROR]', '').trim();
                         addDebugEntry('error', 'system', content);
-                    } else if (trimmed !== '[DONE]') {
-                        // Regular response text
+                        updateThinking('❌ ' + content);
+
+                    } else if (trimmed.startsWith('[RESPONSE]')) {
+                        // Backward compat: old RESPONSE marker
+                        hideThinking();
+                        if (!botBubbleCreated) {
+                            addBotMessage();
+                            botBubbleCreated = true;
+                        }
+
+                    } else {
+                        // Unmarked text — treat as response content
+                        if (!botBubbleCreated) {
+                            hideThinking();
+                            addBotMessage();
+                            botBubbleCreated = true;
+                        }
                         addBotText(trimmed + '\n');
                     }
                 }
             }
 
             // Finalize
-            setPipelineStep('respond');
+            hideThinking();
             resetAllAgentStatuses();
-            addDebugEntry('event', 'orchestrator', '编排完成');
 
         } catch (error) {
             hideThinking();
             console.error('Chat error:', error);
             if (currentBotBubble) {
                 currentBotBubble.innerHTML = '<span style="color:#e17055;">抱歉，服务暂时不可用，请稍后重试。</span>';
+            } else {
+                addBotMessage();
+                if (currentBotBubble) {
+                    currentBotBubble.innerHTML = '<span style="color:#e17055;">抱歉，服务暂时不可用，请稍后重试。</span>';
+                }
             }
             addDebugEntry('error', 'system', error.message);
         } finally {
@@ -1109,7 +1189,6 @@
             sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i> 发送';
             userInput.focus();
 
-            // Clean up IDs
             if (currentBotBubble) currentBotBubble.removeAttribute('id');
             currentBotBubble = null;
             currentOrchBlock = null;

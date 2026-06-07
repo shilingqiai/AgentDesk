@@ -23,7 +23,7 @@ from typing import Optional
 from langchain.prompts import PromptTemplate
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from .intent_classifier import IntentResult
+from .router import RouteResult as IntentResult  # 兼容别名
 
 logger = logging.getLogger("orchestrator.task_planner")
 

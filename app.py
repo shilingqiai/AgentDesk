@@ -105,7 +105,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from api.core.exceptions import api_exception_handler, general_exception_handler, BusinessException
+    from api.exceptions import api_exception_handler, general_exception_handler, BusinessException
     app.add_exception_handler(BusinessException, api_exception_handler)
     app.add_exception_handler(Exception, general_exception_handler)
 
