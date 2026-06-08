@@ -54,7 +54,6 @@
         .nav-links a:hover, .nav-links a.active { color: #fff; background: rgba(255,255,255,0.06); }
         .nav-links a i { margin-right: 8px; width: 16px; text-align: center; }
 
-        /* Room list in sidebar */
         .room-list { flex: 1; padding: 12px 16px; overflow-y: auto; }
         .room-card {
             background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
@@ -62,9 +61,7 @@
             cursor: pointer; transition: all 0.2s;
         }
         .room-card:hover { background: rgba(255,255,255,0.08); transform: translateX(2px); }
-        .room-card.selected {
-            background: rgba(108,92,231,0.15); border-color: var(--accent);
-        }
+        .room-card.selected { background: rgba(108,92,231,0.15); border-color: var(--accent); }
         .room-card .room-name { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px; }
         .room-card .room-loc { font-size: 12px; color: var(--text-sidebar-muted); }
         .room-card .room-meta { display: flex; gap: 12px; margin-top: 8px; font-size: 11px; color: var(--text-sidebar-muted); }
@@ -82,20 +79,13 @@
             display: flex; align-items: center; justify-content: space-between; box-shadow: var(--shadow);
         }
         .topbar-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
-        .topbar-date {
-            display: flex; align-items: center; gap: 8px;
-        }
-        .topbar-date input {
-            padding: 8px 12px; border: 2px solid var(--border); border-radius: var(--radius-sm);
-            font-size: 14px; font-family: inherit; outline: none;
-        }
-        .topbar-date input:focus { border-color: var(--accent); }
+        .topbar-actions { display: flex; align-items: center; gap: 8px; }
 
         .btn {
             padding: 8px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border);
             background: var(--bg-card); cursor: pointer; font-size: 13px; display: inline-flex;
             align-items: center; gap: 6px; transition: all 0.2s; color: var(--text-primary);
-            font-family: inherit;
+            font-family: inherit; white-space: nowrap;
         }
         .btn:hover { background: var(--bg-input); }
         .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -103,66 +93,92 @@
         .btn.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
         .btn.sm { padding: 4px 10px; font-size: 12px; }
 
-        /* === TIMELINE === */
-        .content { flex: 1; overflow-y: auto; padding: 24px; }
-        .timeline-empty {
-            text-align: center; padding: 80px 20px; color: var(--text-secondary);
-        }
-        .timeline-empty i { font-size: 48px; display: block; margin-bottom: 16px; opacity: 0.3; }
-        .timeline-empty h3 { margin-bottom: 8px; }
+        /* === CONTENT: Multi-Day View === */
+        .content { flex: 1; overflow: hidden; display: flex; flex-direction: column; padding: 20px; }
 
         .selected-room-header {
-            background: var(--bg-card); border-radius: var(--radius); padding: 20px 24px;
-            margin-bottom: 20px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 16px;
+            background: var(--bg-card); border-radius: var(--radius); padding: 16px 20px;
+            margin-bottom: 16px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 14px;
+            flex-shrink: 0;
         }
         .selected-room-header .room-icon {
-            width: 56px; height: 56px; border-radius: 12px;
+            width: 48px; height: 48px; border-radius: 12px;
             background: linear-gradient(135deg, #6c5ce7, #a29bfe);
             display: flex; align-items: center; justify-content: center;
-            font-size: 24px; color: #fff; flex-shrink: 0;
+            font-size: 20px; color: #fff; flex-shrink: 0;
         }
         .selected-room-header .info { flex: 1; }
-        .selected-room-header .info h3 { font-size: 18px; margin-bottom: 4px; }
-        .selected-room-header .info p { font-size: 13px; color: var(--text-secondary); }
+        .selected-room-header .info h3 { font-size: 16px; margin-bottom: 2px; }
+        .selected-room-header .info p { font-size: 12px; color: var(--text-secondary); }
 
-        .timeline { position: relative; }
-        .time-slot {
-            display: flex; align-items: center; border-bottom: 1px solid var(--border);
-            min-height: 48px; transition: background 0.15s;
+        /* Day Columns Container */
+        .day-columns {
+            flex: 1; display: flex; gap: 12px; overflow-x: auto; overflow-y: hidden;
+            padding-bottom: 8px;
         }
-        .time-slot:last-child { border-bottom: none; }
-        .time-slot .time-label {
-            width: 60px; flex-shrink: 0; font-size: 12px; color: var(--text-secondary);
-            text-align: right; padding-right: 12px; font-variant-numeric: tabular-nums;
+        .day-column {
+            flex: 1; min-width: 140px; max-width: 220px;
+            background: var(--bg-card); border-radius: var(--radius-sm);
+            box-shadow: var(--shadow); display: flex; flex-direction: column;
+            overflow: hidden;
         }
-        .time-slot .slot-bar {
-            flex: 1; height: 36px; margin: 6px 8px; border-radius: 6px; transition: all 0.2s;
-            cursor: pointer; position: relative;
+        .day-column.today { border-top: 3px solid var(--accent); }
+
+        .day-column-header {
+            padding: 10px 12px 6px; text-align: center; border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
         }
-        .time-slot .slot-bar.available { background: rgba(0,184,148,0.08); border: 1px dashed rgba(0,184,148,0.2); }
-        .time-slot .slot-bar.available:hover { background: rgba(0,184,148,0.16); border-color: var(--success); }
-        .time-slot .slot-bar.booked {
-            background: rgba(225,112,85,0.1); border: 1px solid rgba(225,112,85,0.2);
+        .day-column-header .weekday { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+        .day-column-header .date { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+        .day-column.today .weekday { color: var(--accent); }
+
+        .day-column-slots {
+            flex: 1; overflow-y: auto; padding: 4px;
+        }
+        .slot-cell {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 5px 8px; margin: 2px 0; border-radius: 4px;
+            font-size: 12px; cursor: pointer; transition: all 0.15s;
+            min-height: 32px;
+        }
+        .slot-cell .time { font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-secondary); }
+        .slot-cell .status-icon { font-size: 14px; flex-shrink: 0; }
+
+        .slot-cell.available { background: rgba(0,184,148,0.06); border: 1px solid transparent; }
+        .slot-cell.available:hover { background: rgba(0,184,148,0.14); border-color: var(--success); }
+
+        .slot-cell.booked {
+            background: rgba(225,112,85,0.08); border: 1px solid transparent;
             cursor: not-allowed;
         }
-        .time-slot .slot-bar.booked .booked-label {
-            position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-            font-size: 12px; color: var(--danger); font-weight: 500;
+        .slot-cell.booked .booked-info {
+            font-size: 10px; color: var(--danger); max-width: 70px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
-        .time-slot .slot-bar.past { background: rgba(0,0,0,0.03); cursor: default; }
+
+        .slot-cell.past {
+            background: rgba(0,0,0,0.02); cursor: default; opacity: 0.5;
+        }
 
         /* Legend */
         .legend {
-            display: flex; gap: 24px; margin-top: 20px; padding: 12px 16px;
+            display: flex; gap: 20px; margin-top: 12px; padding: 8px 14px;
             background: var(--bg-card); border-radius: var(--radius-sm);
-            font-size: 12px; color: var(--text-secondary);
+            font-size: 12px; color: var(--text-secondary); flex-shrink: 0;
         }
         .legend span { display: flex; align-items: center; gap: 6px; }
         .legend .dot {
             width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0;
         }
-        .legend .dot.avail { background: rgba(0,184,148,0.2); border: 1px dashed var(--success); }
-        .legend .dot.bkd { background: rgba(225,112,85,0.1); border: 1px solid rgba(225,112,85,0.3); }
+        .legend .dot.avail { background: rgba(0,184,148,0.14); border: 1px solid var(--success); }
+        .legend .dot.bkd { background: rgba(225,112,85,0.12); border: 1px solid rgba(225,112,85,0.3); }
+
+        /* Empty State */
+        .timeline-empty {
+            text-align: center; padding: 80px 20px; color: var(--text-secondary);
+        }
+        .timeline-empty i { font-size: 48px; display: block; margin-bottom: 16px; opacity: 0.3; }
+        .timeline-empty h3 { margin-bottom: 8px; }
 
         /* === BOOKING MODAL === */
         .modal-overlay {
@@ -196,12 +212,12 @@
         .toast.success { background: var(--success); }
         .toast.error { background: var(--danger); }
 
-        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 3px; }
 
         @media (max-width: 768px) {
             .sidebar { display: none; }
-            .time-slot .time-label { width: 40px; font-size: 10px; }
+            .day-column { min-width: 110px; }
         }
     </style>
 </head>
@@ -245,15 +261,12 @@
     <div class="topbar">
         <div class="topbar-title">
             <i class="fas fa-building" style="color:var(--accent);"></i>
-            <span x-text="selectedRoom ? selectedRoom.name + ' · 可用时段' : '请选择会议室'"></span>
+            <span x-text="selectedRoom ? selectedRoom.name + ' · 近5天可用时段' : '请选择会议室'"></span>
         </div>
-        <div class="topbar-date">
-            <button class="btn" @click="prevDay()"><i class="fas fa-chevron-left"></i></button>
-            <input type="date" x-model="currentDate" @change="loadAvailability()"
-                   :min="today">
-            <button class="btn" @click="nextDay()"><i class="fas fa-chevron-right"></i></button>
-            <button class="btn" @click="currentDate = today; loadAvailability()">
-                <i class="fas fa-calendar-day"></i> 今天
+        <div class="topbar-actions">
+            <span style="font-size:12px;color:var(--text-secondary);" x-show="dateRangeLabel" x-text="dateRangeLabel"></span>
+            <button class="btn" @click="loadMultiDay()">
+                <i class="fas fa-sync-alt"></i> 刷新
             </button>
         </div>
     </div>
@@ -262,13 +275,13 @@
         <!-- No room selected -->
         <div class="timeline-empty" x-show="!selectedRoom">
             <i class="fas fa-door-open"></i>
-            <h3>选择左侧会议室查看可用时段</h3>
+            <h3>选择左侧会议室查看近5天可用时段</h3>
             <p>点击空白时段即可快速预定</p>
         </div>
 
-        <!-- Room selected -->
+        <!-- Room selected — Multi-Day Columns -->
         <template x-if="selectedRoom">
-            <div>
+            <div style="display:flex;flex-direction:column;flex:1;min-height:0;">
                 <div class="selected-room-header">
                     <div class="room-icon"><i class="fas fa-door-open"></i></div>
                     <div class="info">
@@ -279,34 +292,52 @@
                             <span x-text="selectedRoom.description"></span>
                         </p>
                     </div>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                        <template x-for="a in selectedRoom.amenities" :key="a">
+                            <span class="amenity-tag" x-text="a"></span>
+                        </template>
+                    </div>
                 </div>
 
-                <!-- Timeline -->
-                <div class="timeline" x-show="slots.length > 0">
-                    <template x-for="slot in slots" :key="slot.start">
-                        <div class="time-slot">
-                            <div class="time-label" x-text="slot.start"></div>
-                            <div class="slot-bar"
-                                 :class="{
-                                     available: slot.available && !isPast(slot.start),
-                                     booked: !slot.available,
-                                     past: isPast(slot.start)
-                                 }"
-                                 @click="slot.available && !isPast(slot.start) && openBooking(slot)">
-                                <span class="booked-label" x-show="!slot.available" x-text="slot.booked_title || '已预定'"></span>
+                <!-- Day Columns -->
+                <div class="day-columns" x-show="dayColumns.length > 0" id="dayColumnsContainer">
+                    <template x-for="(col, ci) in dayColumns" :key="col.date">
+                        <div class="day-column" :class="{ today: col.isToday }">
+                            <div class="day-column-header">
+                                <div class="weekday" x-text="col.weekday"></div>
+                                <div class="date" x-text="col.dateLabel"></div>
+                            </div>
+                            <div class="day-column-slots"
+                                 x-show="!col.loading"
+                                 :id="'col-slots-' + ci">
+                                <template x-for="slot in col.slots" :key="slot.start">
+                                    <div class="slot-cell"
+                                         :class="{
+                                             available: slot.available && !slot.isPast,
+                                             booked: !slot.available,
+                                             past: slot.isPast
+                                         }"
+                                         :title="slot.booked_title || ''"
+                                         @click="slot.available && !slot.isPast && openBooking(col.date, slot)">
+                                        <span class="time" x-text="slot.start"></span>
+                                        <span class="status-icon" x-show="slot.available && !slot.isPast" style="color:var(--success);">✓</span>
+                                        <span class="status-icon" x-show="!slot.available && !slot.isPast">✗</span>
+                                        <span class="booked-info" x-show="!slot.available" x-text="slot.booked_title || '已预定'"></span>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="timeline-empty" x-show="col.loading" style="padding:20px;">
+                                <i class="fas fa-spinner fa-spin"></i>
                             </div>
                         </div>
                     </template>
                 </div>
 
-                <div class="timeline-empty" x-show="slots.length === 0 && loading">
-                    <i class="fas fa-spinner fa-spin"></i>
-                    <h3>加载中...</h3>
-                </div>
-
-                <div class="legend" x-show="slots.length > 0">
+                <div class="legend" x-show="dayColumns.length > 0">
                     <span><span class="dot avail"></span> 可预定</span>
                     <span><span class="dot bkd"></span> 已预定</span>
+                    <span style="opacity:0.5;">○ 已过时</span>
+                    <span style="margin-left:auto;font-size:11px;">点击 ✓ 时段即可预定</span>
                 </div>
             </div>
         </template>
@@ -324,7 +355,7 @@
             </div>
             <div class="form-group">
                 <label>日期</label>
-                <input type="text" class="form-control" x-model="currentDate" disabled>
+                <input type="text" class="form-control" x-model="bookingForm.date" disabled>
             </div>
             <div class="form-group">
                 <label>时间段</label>
@@ -363,17 +394,22 @@
 
 <script>
 function meetingApp() {
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+    function formatDate(d) {
+        return d.toISOString().split('T')[0];
+    }
+
     return {
         rooms: [],
         selectedRoom: null,
-        currentDate: today,
-        today: today,
-        slots: [],
-        loading: false,
+        dayColumns: [],
+        dateRangeLabel: '',
         showModal: false,
         submitting: false,
-        bookingForm: { start_time: '', end_time: '', title: '', booked_by: '', description: '' },
+        bookingForm: { date: '', start_time: '', end_time: '', title: '', booked_by: '', description: '' },
         toast: { show: false, message: '', type: 'success' },
 
         async init() {
@@ -392,31 +428,63 @@ function meetingApp() {
 
         async selectRoom(room) {
             this.selectedRoom = room;
-            this.slots = [];
-            await this.loadAvailability();
+            this.dayColumns = [];
+            await this.loadMultiDay();
         },
 
-        async loadAvailability() {
+        async loadMultiDay() {
             if (!this.selectedRoom) return;
-            this.loading = true;
-            try {
-                const res = await fetch(
-                    `/api/meeting-rooms/${this.selectedRoom.id}/availability?date=${this.currentDate}`
-                );
-                const data = await res.json();
-                if (data.data) {
-                    this.slots = data.data.slots || [];
-                }
-            } catch (e) {
-                this.showToast('加载可用时段失败', 'error');
-            } finally {
-                this.loading = false;
+
+            // Build 5 days: today through today+4
+            const days = [];
+            for (let i = 0; i < 5; i++) {
+                const d = new Date(today);
+                d.setDate(d.getDate() + i);
+                const dateStr = formatDate(d);
+                days.push({
+                    date: dateStr,
+                    dateLabel: `${d.getMonth() + 1}/${d.getDate()}`,
+                    weekday: i === 0 ? '今天' : weekdays[d.getDay()],
+                    isToday: i === 0,
+                    slots: [],
+                    loading: true,
+                });
             }
+            this.dayColumns = days;
+            this.dateRangeLabel = `${days[0].dateLabel} — ${days[4].dateLabel}`;
+
+            // Load all 5 days in parallel
+            const results = await Promise.allSettled(
+                days.map(d =>
+                    fetch(`/api/meeting-rooms/${this.selectedRoom.id}/availability?date=${d.date}`)
+                        .then(r => r.json())
+                )
+            );
+
+            const now = new Date();
+            results.forEach((result, i) => {
+                if (result.status === 'fulfilled' && result.value?.data) {
+                    const slots = (result.value.data.slots || []).map(s => {
+                        const [sh, sm] = s.start.split(':').map(Number);
+                        const slotDt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), sh, sm);
+                        // Only mark as past if the date matches today AND time is past
+                        const isPastDay = days[i].date < todayStr;
+                        const isPastTime = days[i].date === todayStr && slotDt <= now;
+                        return {
+                            ...s,
+                            isPast: isPastDay || isPastTime,
+                        };
+                    });
+                    this.dayColumns[i].slots = slots;
+                }
+                this.dayColumns[i].loading = false;
+            });
         },
 
-        openBooking(slot) {
+        openBooking(dateStr, slot) {
             if (!this.selectedRoom) return;
             this.bookingForm = {
+                date: dateStr,
                 start_time: slot.start,
                 end_time: slot.end,
                 title: '',
@@ -439,7 +507,7 @@ function meetingApp() {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        date: this.currentDate,
+                        date: this.bookingForm.date,
                         start_time: this.bookingForm.start_time,
                         end_time: this.bookingForm.end_time,
                         title: this.bookingForm.title,
@@ -451,7 +519,7 @@ function meetingApp() {
                 if (res.ok) {
                     this.showToast('会议室预定成功！', 'success');
                     this.showModal = false;
-                    await this.loadAvailability();
+                    await this.loadMultiDay();
                 } else {
                     this.showToast(data.detail || '预定失败', 'error');
                 }
@@ -460,28 +528,6 @@ function meetingApp() {
             } finally {
                 this.submitting = false;
             }
-        },
-
-        isPast(slotStart) {
-            if (this.currentDate !== this.today) return false;
-            const now = new Date();
-            const [h, m] = slotStart.split(':').map(Number);
-            const slotTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m);
-            return slotTime <= now;
-        },
-
-        prevDay() {
-            const d = new Date(this.currentDate);
-            d.setDate(d.getDate() - 1);
-            this.currentDate = d.toISOString().split('T')[0];
-            this.loadAvailability();
-        },
-
-        nextDay() {
-            const d = new Date(this.currentDate);
-            d.setDate(d.getDate() + 1);
-            this.currentDate = d.toISOString().split('T')[0];
-            this.loadAvailability();
         },
 
         showToast(message, type) {
