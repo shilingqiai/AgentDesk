@@ -1186,6 +1186,12 @@
         cancelBtn.className = 'btn';
         cancelBtn.textContent = dismissText;
         cancelBtn.onclick = () => {
+            // 清除后端卡片锁状态
+            fetch('/chat/reset-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message: '', thread_id: threadId}),
+            }).catch(() => {});
             wrapper.innerHTML = '<div class="card-fallback"><span style="color:var(--text-secondary);">' +
                 (dismissText === '问题已解决' ? '✅ 问题已解决，无需创建工单' : '已取消') +
                 '</span></div>';

@@ -107,6 +107,20 @@ async def reset_conversation(chat: ChatRequest):
     message_bus.clear_trace(chat.thread_id)
     return {"status": "reset"}
 
+
+@router.post("/chat/reset-card", summary="清除卡片锁定状态")
+async def reset_card_state(chat: ChatRequest):
+    """用户 dismiss 卡片时清除 pending_card_type"""
+    from agents.graph_workflow import orchestration_runner
+
+    config = {"configurable": {"thread_id": chat.thread_id}}
+    state = orchestration_runner.app.get_state(config)
+    if state and state.values:
+        orchestration_runner.app.update_state(
+            config, {"pending_card_type": ""},
+        )
+    return {"status": "ok"}
+
 @router.get("/api/agents/list", summary="已注册Agent列表")
 async def list_registered_agents():
     from agents.orchestrator.agent_registry import agent_registry

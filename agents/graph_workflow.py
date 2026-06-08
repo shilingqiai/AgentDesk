@@ -53,6 +53,8 @@ class TicketState(TypedDict):
     final_response: str
     resolved: bool
     thread_id: str
+    pending_card_type: str   # "" = 无锁, "admin"/"it_fault"/"leave"/"expense" = 卡片锁定中
+    re_route: bool           # True = action_track 处理完回 Router 重路由
 
 
 def create_initial_state(user_input: str, thread_id: str = "default") -> TicketState:
@@ -62,6 +64,7 @@ def create_initial_state(user_input: str, thread_id: str = "default") -> TicketS
         confidence=0.0, plan=[], current_step=0, agent_results={},
         needs_human_review=False, human_decision=None,
         final_response="", resolved=False, thread_id=thread_id,
+        pending_card_type="", re_route=False,
     )
 
 
@@ -92,9 +95,20 @@ def _get_user_text(state: TicketState) -> str:
 # ============================================================
 
 async def route_node(state: TicketState) -> TicketState:
-    """语义路由 — LLM 判定轨道，低置信度 → clarify"""
+    """语义路由 — LLM 判定轨道，低置信度 → clarify。卡片锁期间短路。"""
     from agents.orchestrator.router import Router
     from agents.orchestrator.agent_registry import agent_registry
+
+    # 卡片锁：pending_card 存在 → 短路 Router，所有输入直送 action_track
+    pending = state.get("pending_card_type", "")
+    if pending:
+        logger.info(f"[Route] 卡片锁 pending_card={pending}，短路 Router → action")
+        state["track"] = "action"
+        state["agent_id"] = "ticket_dispatch"
+        state["confidence"] = 1.0
+        state["intent"] = pending
+        state["resolved"] = False
+        return state
 
     router = Router()
     user_text = _get_user_text(state)
@@ -198,18 +212,89 @@ async def fast_track_node(state: TicketState) -> TicketState:
 
 
 async def action_track_node(state: TicketState) -> TicketState:
-    """动作通道 (15%)：委派 TicketDispatchSubAgent 创建工单"""
+    """动作通道 (15%)：委派 TicketDispatchSubAgent。卡片锁期间做意图分类。"""
     from agents.orchestrator.agent_registry import agent_registry
     from agents.a2a.protocol import AgentMessage as AM
     from agents.a2a.message_bus import message_bus
 
     user_text = _get_user_text(state)
+    pending = state.get("pending_card_type", "")
 
     agent_instance = agent_registry.get_agent("ticket_dispatch")
     if agent_instance is None:
         logger.warning("[ActionTrack] TicketDispatch 未注册，降级为 fast")
+        state["pending_card_type"] = ""
+        state["re_route"] = False
         return await fast_track_node(state)
 
+    # ================================================================
+    # 卡片锁模式：用户回复已存在的卡片 → LLM 分类意图
+    # ================================================================
+    if pending:
+        prev_card = state.get("agent_results", {}).get("ticket_dispatch", {}).get("card", {})
+
+        try:
+            intent = await agent_instance.classify_card_response(
+                user_text=user_text, card=prev_card, ticket_type=pending,
+            )
+        except Exception as e:
+            logger.error(f"[ActionTrack] 意图分类失败: {e}，fallback → confirm")
+            intent = "confirm"
+
+        logger.info(
+            f"[ActionTrack] 卡片锁 pending={pending} intent={intent} "
+            f"input={user_text[:50]}"
+        )
+
+        if intent == "confirm":
+            try:
+                result_text = await agent_instance.execute_card(prev_card, user_text)
+                state["final_response"] = result_text
+            except Exception as e:
+                logger.error(f"[ActionTrack] 卡片执行失败: {e}")
+                state["final_response"] = f"操作失败：{e}\n请稍后重试。"
+            state["pending_card_type"] = ""
+            state["re_route"] = False
+
+        elif intent == "modify":
+            try:
+                new_card = await agent_instance.rebuild_card(
+                    prev_card, user_text, pending,
+                )
+                import json as _json
+                desc = new_card.get("description", "")
+                state["final_response"] = (
+                    "📋 **已根据您的要求更新：**\n\n"
+                    + desc
+                    + "\n[CARD]" + _json.dumps(new_card, ensure_ascii=False)
+                )
+                state["agent_results"]["ticket_dispatch"] = {
+                    "success": True, "payload": {}, "error": None,
+                    "card": new_card,
+                }
+                # pending_card_type 保持，不下锁
+            except Exception as e:
+                logger.error(f"[ActionTrack] 卡片重建失败: {e}")
+                state["final_response"] = f"无法更新卡片：{e}"
+                state["pending_card_type"] = ""
+            state["re_route"] = False
+
+        elif intent == "cancel":
+            state["final_response"] = "好的，已取消。还有其他需要帮您的吗？"
+            state["pending_card_type"] = ""
+            state["re_route"] = False
+
+        elif intent == "new_topic":
+            state["pending_card_type"] = ""
+            state["re_route"] = True
+            # 不设 final_response — 后续重路由的节点会填
+
+        state["resolved"] = True
+        return state
+
+    # ================================================================
+    # 非锁模式（现有逻辑）：创建新工单 / 返回新卡片
+    # ================================================================
     delegation = AM.create_delegation(
         from_agent="orchestrator", to_agent="ticket_dispatch",
         payload={
@@ -232,6 +317,7 @@ async def action_track_node(state: TicketState) -> TicketState:
             # 确认卡片模式
             import json as _json
             card = result.payload.get("card", {})
+            ticket_type = result.payload.get("ticket_type", "")
             state["final_response"] = (
                 "📋 **请确认以下信息**\n\n"
                 + card.get("description", "")
@@ -241,6 +327,9 @@ async def action_track_node(state: TicketState) -> TicketState:
                 "success": True, "payload": result.payload, "error": None,
                 "card": card,
             }
+            # 设置卡片锁：下一轮文本输入将短路 Router
+            state["pending_card_type"] = ticket_type
+            logger.info(f"[ActionTrack] 设置卡片锁 pending_card_type={ticket_type}")
         elif result.success and result.payload.get("direct_response"):
             state["final_response"] = result.payload["direct_response"]
         elif result.error:
@@ -255,6 +344,7 @@ async def action_track_node(state: TicketState) -> TicketState:
         state["final_response"] = "抱歉，执行操作时出现了问题。请稍后重试或联系服务台。"
 
     state["resolved"] = True
+    state["re_route"] = False
     return state
 
 
@@ -403,6 +493,14 @@ def route_after_route(state: TicketState) -> Literal[
     else:                     return "clarification"
 
 
+def after_action_track(state: TicketState) -> Literal["route", "respond"]:
+    """卡片锁 new_topic 时重路由，其他情况正常结束"""
+    if state.get("re_route"):
+        logger.info("[Graph] action_track → route (re_route)")
+        return "route"
+    return "respond"
+
+
 # ============================================================
 # 构建工作流图
 # ============================================================
@@ -427,7 +525,11 @@ def build_orchestration_workflow() -> StateGraph:
     })
 
     workflow.add_edge("fast_track", "respond")
-    workflow.add_edge("action_track", "respond")
+    # action_track 用条件边：new_topic → 回 route 重路由，其余 → respond
+    workflow.add_conditional_edges("action_track", after_action_track, {
+        "route": "route",
+        "respond": "respond",
+    })
     workflow.add_edge("complex_track", "respond")
     workflow.add_edge("clarification", "respond")
     workflow.add_edge("respond", END)
@@ -495,17 +597,94 @@ class OrchestrationWorkflowRunner:
         v3 改进：fast_track 使用真流式（LLM token 级推送），
         其他轨道因执行速度快保留伪流式。
 
+        v3.1 卡片锁：pending_card 期间短路 Router，Agent 分类意图，
+        换话题时图内重路由。
+
         输出令牌：
           [THINKING] <文字>            — 更新"思考中..."文字
           [ROUTE] <轨道描述>           — 路由判定结果
           [CLARIFY] <反问文字>         — AI 反问用户澄清意图
           [FAST]/[ACTION]/[COMPLEX]    — 轨道入口
           [STREAM]<文字片段>           — 流式回答片段（fast_track 为真流式）
+          [CARD]<JSON>                 — 确认卡片
           [DONE]                       — 完成
         """
         initial_state = create_initial_state(user_input, thread_id)
         config = {"configurable": {"thread_id": thread_id}}
 
+        # ================================================================
+        # 卡片锁模式：检测上一轮是否留下了 pending_card
+        # ================================================================
+        prev = self.app.get_state(config)
+        pending_card = ""
+        if prev and prev.values:
+            pending_card = prev.values.get("pending_card_type", "")
+            # 传递上一轮的 agent_results（含卡片数据）
+            if pending_card:
+                prev_agent_results = prev.values.get("agent_results", {})
+                if prev_agent_results:
+                    initial_state["agent_results"] = prev_agent_results
+
+        if pending_card:
+            # 跳过 Router，直送 action_track 让 Agent 分类意图
+            initial_state["pending_card_type"] = pending_card
+            initial_state["track"] = "action"
+
+            yield f"[ROUTE] 📋 处理您对「{pending_card}」卡片的回复\n"
+            yield "[THINKING] 🔍 正在理解您的意图...\n"
+
+            async for event in self.app.astream(initial_state, config):
+                for node_name, node_state in event.items():
+                    if node_name == "action_track":
+                        yield "[ACTION] ⚡ 动作通道 · 处理卡片回复\n"
+                        resp = node_state.get("final_response", "")
+                        if resp:
+                            if "[CARD]" in resp:
+                                parts = resp.split("[CARD]", 1)
+                                text_part = parts[0].strip()
+                                card_part = parts[1].strip() if len(parts) > 1 else ""
+                                if text_part:
+                                    yield f"[STREAM]{text_part}\n"
+                                if card_part:
+                                    yield f"[CARD]{card_part}\n"
+                            else:
+                                yield f"[STREAM]{resp}\n"
+
+                        if node_state.get("re_route"):
+                            yield "[ROUTE] 🔄 切换话题，重新分析...\n"
+                            yield "[THINKING] 🔍 正在路由到对应轨道...\n"
+
+                    elif node_name == "route":
+                        # 重路由后的 route_node，静默
+                        track = node_state.get("track", "")
+                        if track and track != "action":
+                            track_names = {
+                                "fast": "🔍 极速通道 · 企业知识库问答",
+                                "action": "⚡ 动作通道 · 工单派发",
+                                "complex": "🧩 复杂通道 · 多步骤编排",
+                            }
+                            yield f"[ROUTE] {track_names.get(track, track)}\n"
+
+                    elif node_name in ("fast_track", "complex_track", "clarification"):
+                        if node_name == "fast_track":
+                            yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
+                        elif node_name == "complex_track":
+                            yield "[COMPLEX] 🧩 复杂通道 · 多步骤编排\n"
+                        elif node_name == "clarification":
+                            yield "[CLARIFY] 🤔 AI 需要确认您的意图\n"
+                        resp = node_state.get("final_response", "")
+                        if resp:
+                            yield f"[STREAM]{resp}\n"
+
+                    elif node_name == "respond":
+                        pass
+
+            yield "[DONE]\n"
+            return
+
+        # ================================================================
+        # 非锁模式（现有逻辑）
+        # ================================================================
         yield "[THINKING] 🔍 正在分析您的问题...\n"
 
         # 先用 route_node 拿到路由结果

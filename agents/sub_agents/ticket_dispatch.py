@@ -1233,8 +1233,214 @@ class TicketDispatchSubAgent(BaseSubAgent):
         return "\n".join(lines)
 
     # ============================================================
-    # 查询方法
+    # 卡片回复处理（v3.1 卡片锁）
     # ============================================================
+
+    async def classify_card_response(
+        self, user_text: str, card: dict, ticket_type: str,
+    ) -> str:
+        """
+        用轻量 LLM 分类用户对卡片的回复意图。
+
+        Returns: "confirm" | "modify" | "cancel" | "new_topic"
+        """
+        card_desc = card.get("description", "")
+        card_fields = card.get("fields", [])
+
+        prompt = (
+            "你是企业服务台的意图分类器。用户看到了一张确认卡片，然后回复了一句话。\n"
+            "请判断用户的意图。\n\n"
+            f"卡片类型：{ticket_type}\n"
+            f"卡片标题：{card.get('title', '')}\n"
+            f"卡片描述：{card_desc[:300]}\n"
+            f"卡片字段：{json.dumps([f.get('label','') for f in card_fields], ensure_ascii=False)}\n\n"
+            f"用户回复：\"{user_text}\"\n\n"
+            "分类为以下之一（只输出一个单词）：\n"
+            "- confirm: 用户确认/同意卡片内容，要求执行操作。"
+            "包括简短确认（'好的''行''ok'）和长句确认（'行吧那就帮我定了吧谢谢你'）\n"
+            "- modify: 用户想修改卡片的某个参数（改时间、换房间、改金额、换主题等）\n"
+            "- cancel: 用户想取消/放弃/不要了（'算了''不定了''取消吧'）\n"
+            "- new_topic: 用户完全换了话题，问的是不相关的事"
+            "（'帮我查VPN''年假几天''你是AI吗'）\n\n"
+            "只输出一个单词："
+        )
+
+        from config.model_provider import create_chat_model
+        llm = create_chat_model(model_type="router", temperature=0)
+        response = await llm.ainvoke(prompt)
+        text = response.content.strip().lower()
+
+        for intent in ["confirm", "modify", "cancel", "new_topic"]:
+            if intent in text:
+                logger.info(f"[classify_card_response] → {intent} (raw: {text[:50]})")
+                return intent
+
+        # 默认：短回复 → confirm，长回复 → new_topic
+        fallback = "confirm" if len(user_text) <= 10 else "new_topic"
+        logger.info(f"[classify_card_response] fallback → {fallback} (raw: {text[:50]})")
+        return fallback
+
+    async def execute_card(self, card: dict, user_text: str) -> str:
+        """
+        执行卡片确认后的实际操作。
+
+        根据卡片类型：
+        - admin: 预定会议室（调用 MeetingRoom API）
+        - leave/expense/it_fault: 创建工单（写入 DB）
+        """
+        card_type = card.get("type", "")
+        action_url = card.get("action", "")
+        confirm_text = card.get("confirm_text", "")
+
+        # admin / booking 类型 → 预定会议室
+        if card_type == "booking" or "meeting-rooms" in action_url:
+            return await self._execute_booking_card(card, user_text)
+
+        # 其他类型 → 创建工单
+        return await self._execute_ticket_card(card, user_text)
+
+    async def _execute_booking_card(self, card: dict, user_text: str) -> str:
+        """执行会议室预定卡片"""
+        try:
+            from db.models import MeetingRoom, MeetingRoomBooking
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+            import os
+
+            db_path = os.path.join("data", "ticket_dispatch.db")
+            engine = create_engine(
+                f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
+            )
+            SessionLocal = sessionmaker(bind=engine)
+            db = SessionLocal()
+
+            try:
+                fields = {f["key"]: f.get("value", "") for f in card.get("fields", [])}
+                room_id = int(fields.get("room_id", 1))
+                date = fields.get("date", datetime.now().strftime("%Y-%m-%d"))
+                time_slot = fields.get("time_slot", "14:00-15:00")
+                title = fields.get("title", "会议")
+                parts = time_slot.split("-")
+                start_time = parts[0].strip() if parts else "14:00"
+                end_time = parts[1].strip() if len(parts) > 1 else "15:00"
+
+                # 冲突检查
+                existing = db.query(MeetingRoomBooking).filter(
+                    MeetingRoomBooking.room_id == room_id,
+                    MeetingRoomBooking.date == date,
+                    MeetingRoomBooking.status == "confirmed",
+                    MeetingRoomBooking.start_time < end_time,
+                    MeetingRoomBooking.end_time > start_time,
+                ).first()
+
+                if existing:
+                    return (
+                        f"⚠️ 该时段已被「{existing.title}」占用，预定失败。\n"
+                        f"请重新选择会议室或时段。"
+                    )
+
+                booking = MeetingRoomBooking(
+                    room_id=room_id,
+                    date=date,
+                    start_time=start_time,
+                    end_time=end_time,
+                    booked_by="web_user",
+                    title=title,
+                    description="通过聊天卡片预定",
+                    status="confirmed",
+                )
+                db.add(booking)
+                db.commit()
+
+                # 获取房间名
+                room = db.query(MeetingRoom).filter(
+                    MeetingRoom.id == room_id,
+                ).first()
+                room_name = room.name if room else f"会议室 #{room_id}"
+
+                card["success_message"] = card.get("success_message", "").replace(
+                    "会议室预定成功！",
+                    f"{room_name} 预定成功！",
+                )
+
+                fallback_url = card.get("fallback_url", "/meeting-rooms")
+                fallback_text = card.get("fallback_text", "查看会议室日历")
+
+                return (
+                    f"{card.get('success_message', '✅ 会议室预定成功！')}\n\n"
+                    f"📅 {date}  {start_time}-{end_time}\n"
+                    f"🏢 {room_name}\n"
+                    f"📝 {title}\n\n"
+                    f"[查看会议室日历]({fallback_url})"
+                )
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"[_execute_booking_card] 失败: {e}")
+            return f"会议室预定失败：{e}\n请稍后重试或联系行政人员。"
+
+    async def _execute_ticket_card(self, card: dict, user_text: str) -> str:
+        """执行工单创建卡片（IT/请假/报销等）"""
+        try:
+            body_template = card.get("body_template", {})
+            ticket_type = body_template.get("ticket_type", "it_fault")
+            priority = body_template.get("priority", "P2")
+            fields = {f["key"]: f.get("value", "") for f in card.get("fields", [])}
+            title = fields.get("title", user_text[:30])
+            description = fields.get("description", user_text)
+
+            # 创建工单
+            ticket = self.db_router.ticket.add_ticket(
+                ticket_type=ticket_type,
+                title=title,
+                description=description,
+                category=body_template.get("category", "其他"),
+                priority=priority,
+                requester_id="web_user",
+                trace_id=f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                payload={},
+            )
+
+            success_msg = card.get("success_message", "工单创建成功！")
+            fallback_url = card.get("fallback_url", "/tickets")
+            fallback_text = card.get("fallback_text", "查看工单")
+
+            return (
+                f"{success_msg}\n\n"
+                f"📋 工单号：**{ticket.get('ticket_number', 'N/A')}**\n"
+                f"📝 标题：{title}\n\n"
+                f"[{fallback_text}]({fallback_url})"
+            )
+        except Exception as e:
+            logger.error(f"[_execute_ticket_card] 失败: {e}")
+            return f"工单创建失败：{e}\n请稍后重试。"
+
+    async def rebuild_card(
+        self, old_card: dict, user_text: str, ticket_type: str,
+    ) -> dict:
+        """
+        用户想修改卡片参数，用新输入重新提取参数并重建卡片。
+        """
+        try:
+            params = await self._extract_params(user_text)
+
+            # 合并旧卡片的参数（保留未修改的部分）
+            old_fields = {f["key"]: f.get("value", "") for f in old_card.get("fields", [])}
+            for key, val in old_fields.items():
+                if key not in params.get("extra", {}):
+                    if isinstance(params.get("extra"), dict):
+                        params["extra"][key] = val
+
+            return await self._build_card(ticket_type, params, user_text)
+        except Exception as e:
+            logger.error(f"[rebuild_card] 失败: {e}")
+            # 返回原卡片，仅更新描述
+            old_card["description"] = (
+                f"（已尝试按「{user_text}」调整，但参数解析失败，请手动修改）\n\n"
+                + old_card.get("description", "")
+            )
+            return old_card
 
     @classmethod
     def get_ticket(cls, ticket_id: int) -> dict | None:
