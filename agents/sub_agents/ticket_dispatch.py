@@ -980,12 +980,21 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         f"已自动推荐可用会议室。"
                     ),
                 })
+            # 生成替代时段建议（基于可用起始时间 + 推荐时长）
+            alt_slots = []
+            for s_opt in start_options:
+                s_val = s_opt["value"]
+                if s_val == parsed_start:
+                    continue
+                s_dt = dt.strptime(s_val, "%H:%M")
+                e_dt = s_dt + timedelta(minutes=dur_min)
+                if e_dt <= dt.strptime("20:00", "%H:%M"):
+                    alt_slots.append({"start": s_val, "end": e_dt.strftime("%H:%M")})
             for slot in alt_slots[:3]:
-                if slot["start"] != parsed_start:
-                    card["alerts"].append({
-                        "type": "info",
-                        "message": f"💡 也可选择 {slot['start']}-{slot['end']} 时段",
-                    })
+                card["alerts"].append({
+                    "type": "info",
+                    "message": f"💡 也可选择 {slot['start']}-{slot['end']} 时段",
+                })
 
             if not card["alerts"]:
                 del card["alerts"]
