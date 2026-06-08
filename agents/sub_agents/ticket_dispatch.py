@@ -242,14 +242,13 @@ class TicketDispatchSubAgent(BaseSubAgent):
         从用户输入中智能解析日期和时间段。
 
         支持：
-        - "明天早上" → (2026-06-09, 09:00, 10:30)
-        - "今天下午" → (2026-06-08, 14:00, 16:00)
-        - "后天上午" → (2026-06-10, 09:00, 11:00)
-        - "周五下午3点" → (next Friday, 15:00, 16:30)
-        - "下午2点到4点" → (today, 14:00, 16:00)
+        - "明天早上" → (2026-06-09, 09:00, 10:30, False)
+        - "今天下午" → (2026-06-08, 14:00, 16:00, False)
+        - "下午会议两小时" → (2026-06-08, 14:00, 16:00, True)
+        - "下午2点到4点" → (today, 14:00, 16:00, True)
 
         Returns:
-            (date_str, start_time, end_time)  均为字符串
+            (date_str, start_time, end_time, is_explicit_duration)
         """
         from datetime import datetime, timedelta
 
@@ -257,6 +256,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
         date_str = today.strftime("%Y-%m-%d")
         start_time = "14:00"
         end_time = "16:00"
+        is_explicit_duration = False
 
         text = user_input
 
@@ -292,11 +292,57 @@ class TicketDispatchSubAgent(BaseSubAgent):
         if extra.get("start_date"):
             date_str = extra["start_date"]
 
-        # 2. 解析时间段
-        # 精确时间: "下午3点", "14:00", "2点到4点"
+        # ---- 0. 显式时长检测（优先于时段匹配） ----
+        # "两小时" / "2小时" / "一个半小时" / "30分钟" / "一个钟"
         import re
 
-        # 尝试匹配 "X点到Y点" 或 "X:00-Y:00"
+        # 中文数字映射
+        CN_NUM = {
+            "半": 0.5, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+            "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+        }
+
+        dur_minutes = 0
+
+        # "X个半小时" → X * 90min
+        half_hour_match = re.search(
+            r'(\d+(?:\.\d+)?|[一二两三四五六七八九十半])个半小[时钟]', text
+        )
+        if half_hour_match:
+            num_str = half_hour_match.group(1)
+            try:
+                n = float(num_str)
+            except ValueError:
+                n = CN_NUM.get(num_str, 1)
+            dur_minutes = int(n * 90)
+            is_explicit_duration = True
+
+        # "X小时" / "X个小时" / "X个钟"
+        hour_match = re.search(
+            r'(\d+(?:\.\d+)?|[一二两三四五六七八九十半])个?(?:小|钟)(?:时|头)?', text
+        )
+        if hour_match and not is_explicit_duration:
+            num_str = hour_match.group(1)
+            try:
+                n = float(num_str)
+            except ValueError:
+                n = CN_NUM.get(num_str, 1)
+            dur_minutes = int(n * 60)
+            is_explicit_duration = True
+
+        # "X分钟"
+        minute_match = re.search(r'(\d+)\s*分钟', text)
+        if minute_match and not is_explicit_duration:
+            dur_minutes = int(minute_match.group(1))
+            is_explicit_duration = True
+
+        # "半小时"
+        if re.search(r'半小时', text) and not is_explicit_duration:
+            dur_minutes = 30
+            is_explicit_duration = True
+
+        # 2. 解析时间段
+        # 精确时间: "下午3点", "14:00", "2点到4点"
         time_range = re.search(
             r'(\d{1,2})[点:：](\d{0,2})?\s*[到至\-~]\s*(\d{1,2})[点:：](\d{0,2})?',
             text
@@ -311,12 +357,17 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 h2 += 12
             start_time = f"{h1:02d}:00"
             end_time = f"{h2:02d}:00"
-            return date_str, start_time, end_time
+            # 如果有"X点到Y点"，这是显式的
+            is_explicit_duration = True
+            # 但如果有独立时长声明，用声明时长覆盖
+            if dur_minutes > 0 and not time_range:
+                pass  # 用 dur_minutes
+            return date_str, start_time, end_time, is_explicit_duration
 
         # "早上/上午/中午/下午/晚上" 关键时段
         if any(t in text for t in ("早上", "上午", "早晨")):
             start_time = "09:00"
-            end_time = "10:30"
+            end_time = "11:00"
         elif "中午" in text:
             start_time = "12:00"
             end_time = "13:30"
@@ -333,12 +384,23 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 end_time = f"{end_h:02d}:00"
             else:
                 start_time = "14:00"
-                end_time = "16:00"
+                end_time = "17:00"  # 下午默认 3 小时跨度
         elif "晚上" in text:
             start_time = "18:00"
             end_time = "20:00"
 
-        # extra 中的 time_slot 优先级
+        # 3. 应用显式时长
+        if dur_minutes > 0:
+            from datetime import datetime as dt
+            st = dt.strptime(start_time, "%H:%M")
+            et = st + timedelta(minutes=dur_minutes)
+            max_et = dt.strptime("20:00", "%H:%M")
+            if et <= max_et:
+                end_time = et.strftime("%H:%M")
+            else:
+                end_time = "20:00"
+
+        # extra 中的 time_slot 优先级最高
         if extra.get("time_slot"):
             slot = extra["time_slot"]
             if "-" in slot:
@@ -346,8 +408,9 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 if len(parts) == 2:
                     start_time = parts[0].strip()
                     end_time = parts[1].strip()
+                    is_explicit_duration = True
 
-        return date_str, start_time, end_time
+        return date_str, start_time, end_time, is_explicit_duration
 
     # ============================================================
     # 用户偏好记忆
@@ -619,8 +682,8 @@ class TicketDispatchSubAgent(BaseSubAgent):
             service_type = extra.get("service_type", "")
 
             # 1. 智能解析时间
-            parsed_date, parsed_start, parsed_end = self._parse_time_expression(
-                user_input, extra
+            parsed_date, parsed_start, parsed_end, is_explicit_duration = (
+                self._parse_time_expression(user_input, extra)
             )
 
             # 2. 获取用户偏好
@@ -628,7 +691,8 @@ class TicketDispatchSubAgent(BaseSubAgent):
             preferred_room_id = user_prefs.get("preferred_room_id")
 
             # 根据用户历史平均时长调整 end_time
-            if user_prefs.get("avg_duration_minutes"):
+            # 但用户显式指定时长的（如"两小时"）不覆盖
+            if user_prefs.get("avg_duration_minutes") and not is_explicit_duration:
                 from datetime import datetime as dt, timedelta
                 avg_min = user_prefs["avg_duration_minutes"]
                 st = dt.strptime(parsed_start, "%H:%M")
@@ -641,8 +705,23 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 parsed_date, parsed_start, parsed_end, preferred_room_id,
             )
 
-            # 4. 获取会议室列表（用于下拉）
+            # 4. 获取会议室列表（含设备标签 + 设备需求匹配）
             room_options = []
+            raw_rooms = []  # 保留原始数据用于排序
+
+            # 设备关键词 → emoji 标签
+            AMENITY_MAP = {
+                "视频会议": "📹视频", "投影仪": "📽投影", "投影": "📽投影",
+                "电话会议": "📞电话", "白板": "📝白板", "白板墙": "📝白板",
+                "音响": "🔊音响", "茶水": "🍵茶水", "显示器": "🖥显示",
+                "站立桌": "🧍站立", "WiFi": "📶WiFi", "wifi": "📶WiFi",
+            }
+            # 从用户输入中提取设备需求（作用域延到 card 构建）
+            requested_amenity_keys = set()
+            for kw in AMENITY_MAP:
+                if kw.lower() in user_input.lower():
+                    requested_amenity_keys.add(kw)
+
             try:
                 from db.models import MeetingRoom
                 from sqlalchemy import create_engine
@@ -656,20 +735,16 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 SessionLocal = sessionmaker(bind=engine)
                 db = SessionLocal()
                 try:
-                    rooms = db.query(MeetingRoom).filter(
+                    raw_rooms = db.query(MeetingRoom).filter(
                         MeetingRoom.is_active == 1,
                         MeetingRoom.status == "available",
                     ).all()
-                    room_options = [
-                        {
-                            "value": str(r.id),
-                            "label": f"{r.name} ({r.capacity}人) — {r.location}",
-                        }
-                        for r in rooms
-                    ]
                 finally:
                     db.close()
             except Exception:
+                raw_rooms = []
+
+            if not raw_rooms:
                 room_options = [
                     {"value": str(i), "label": f"{n} ({c}人)"}
                     for i, n, c in [
@@ -678,8 +753,45 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         (5, "B201 静思阁", 4),
                     ]
                 ]
+            else:
+                # 为每个房间生成设备标签
+                room_entries = []
+                for r in raw_rooms:
+                    amenities = r.amenities or []
+                    if isinstance(amenities, str):
+                        try:
+                            amenities = json.loads(amenities)
+                        except Exception:
+                            amenities = [amenities]
+                    tags = []
+                    for am in amenities:
+                        for kw, emoji in AMENITY_MAP.items():
+                            if kw.lower() in am.lower() and emoji not in tags:
+                                tags.append(emoji)
+                                break
+                    # 计算匹配度
+                    match_count = 0
+                    if requested_amenity_keys:
+                        for am in amenities:
+                            for kw in requested_amenity_keys:
+                                if kw.lower() in am.lower():
+                                    match_count += 1
 
-            # 5. 默认选中的会议室：首选 > 第一个可用的
+                    room_entries.append((r, tags, match_count))
+
+                # 有设备需求时：匹配房间排前面
+                if requested_amenity_keys:
+                    room_entries.sort(key=lambda x: (-x[2], x[0].id))
+
+                room_options = []
+                for r, tags, _ in room_entries:
+                    tag_str = " ".join(tags[:3]) if tags else ""
+                    label = f"{r.name} ({r.capacity}人) — {r.location}"
+                    if tag_str:
+                        label += f"  [{tag_str}]"
+                    room_options.append({"value": str(r.id), "label": label})
+
+            # 5. 默认选中的会议室：首选 > 设备匹配 > 第一个
             default_room = str(preferred_room_id) if preferred_room_id else None
             if not default_room and room_options:
                 default_room = room_options[0]["value"]
@@ -691,20 +803,33 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         default_room = str(r["id"])
                         break
 
-            # 6. 生成时段选项（包含当前时长和邻近时段）
-            time_options = [
-                {"value": f"{parsed_start}-{parsed_end}",
-                 "label": f"{parsed_start}-{parsed_end} ✨ 推荐"},
-            ]
-            # 添加源自用户偏好的其他常见时段
-            alt_slots = availability.get("alternative_slots", [])
-            for slot in alt_slots[:2]:
-                slot_val = f"{slot['start']}-{slot['end']}"
-                if slot_val not in [o["value"] for o in time_options]:
-                    time_options.append({
-                        "value": slot_val,
-                        "label": f"{slot['start']}-{slot['end']} 🔄 备选",
-                    })
+            # 6. 生成完整时段选项（30分钟粒度，8:00-20:00）
+            from datetime import datetime as dt, timedelta
+
+            slot_duration = int(
+                (dt.strptime(parsed_end, "%H:%M") - dt.strptime(parsed_start, "%H:%M"))
+                .total_seconds() / 60
+            )
+            if slot_duration <= 0:
+                slot_duration = 60
+
+            time_options = []
+            t = dt.strptime("08:00", "%H:%M")
+            max_t = dt.strptime("20:00", "%H:%M")
+            while t + timedelta(minutes=slot_duration) <= max_t:
+                s_str = t.strftime("%H:%M")
+                e_str = (t + timedelta(minutes=slot_duration)).strftime("%H:%M")
+                is_rec = (s_str == parsed_start)
+                label = f"{s_str}-{e_str}"
+                if is_rec:
+                    label += " ✨ 推荐"
+                time_options.append({"value": f"{s_str}-{e_str}", "label": label})
+                t += timedelta(minutes=30)
+
+            # 确保推荐时段在列表中（边界情况）
+            rec_val = f"{parsed_start}-{parsed_end}"
+            if rec_val not in [o["value"] for o in time_options]:
+                time_options.insert(0, {"value": rec_val, "label": f"{rec_val} ✨ 推荐"})
 
             # 7. 构建描述文字
             time_desc = {
@@ -739,6 +864,13 @@ class TicketDispatchSubAgent(BaseSubAgent):
                     f"已自动推荐其他可用会议室"
                 )
 
+            # 构建 room hint
+            room_hint = ""
+            if requested_amenity_keys:
+                room_hint = f"🔍 已筛选支持: {', '.join(requested_amenity_keys)}"
+            elif availability.get("conflict"):
+                room_hint = "已根据可用性筛选"
+
             card = {
                 "type": "booking",
                 "title": "📋 会议室预定",
@@ -749,7 +881,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         "options": room_options,
                         "value": default_room,
                         "required": True,
-                        "hint": "已根据可用性筛选" if availability.get("conflict") else "",
+                        "hint": room_hint,
                     },
                     {
                         "key": "date", "label": "日期", "type": "date",
@@ -803,7 +935,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
         elif ticket_type == "leave":
             extra = params.get("extra", {})
             # 解析日期
-            parsed_date, _, _ = self._parse_time_expression(user_input, extra)
+            parsed_date, _, _, _ = self._parse_time_expression(user_input, extra)
             default_start = parsed_date if extra.get("start_date") or "明天" in user_input or "后天" in user_input else ""
 
             total_days = extra.get("total_days", 0)
