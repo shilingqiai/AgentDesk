@@ -791,7 +791,54 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         label += f"  [{tag_str}]"
                     room_options.append({"value": str(r.id), "label": label})
 
-            # 5. 默认选中的会议室：首选 > 设备匹配 > 第一个
+            # 4.5 容量关键字检测
+            CAPACITY_BIG = {"大", "大点", "大一点", "更大", "最大的", "大的", "大型"}
+            CAPACITY_SMALL = {"小", "小点", "小一点", "更小", "最小的", "小的", "小型"}
+            capacity_filter = None  # "big" | "small" | None
+            import re as _re
+            # "X人" / "X个人" → 精确容量
+            people_match = _re.search(r'(\d+)\s*[个]?人', user_input)
+            min_capacity = int(people_match.group(1)) if people_match else 0
+
+            for kw in CAPACITY_BIG:
+                if kw in user_input:
+                    capacity_filter = "big"
+                    break
+            if not capacity_filter:
+                for kw in CAPACITY_SMALL:
+                    if kw in user_input:
+                        capacity_filter = "small"
+                        break
+
+            # 按容量排序房间
+            room_hint = ""  # 稍后追加设备/冲突信息
+            if capacity_filter or min_capacity > 0:
+                try:
+                    room_with_cap = []
+                    for opt in room_options:
+                        rid = int(opt["value"])
+                        cap = 0
+                        for r in raw_rooms:
+                            if r.id == rid:
+                                cap = r.capacity
+                                break
+                        room_with_cap.append((opt, cap))
+
+                    if min_capacity > 0:
+                        room_with_cap.sort(key=lambda x: (0 if x[1] >= min_capacity else 1, -x[1]))
+                        room_hint = f"🔍 筛选 ≥{min_capacity}人"
+                    elif capacity_filter == "big":
+                        room_with_cap.sort(key=lambda x: -x[1])
+                        room_hint = "🔍 优先大会议室"
+                    elif capacity_filter == "small":
+                        room_with_cap.sort(key=lambda x: x[1])
+                        room_hint = "🔍 优先小会议室"
+
+                    room_options = [opt for opt, _ in room_with_cap]
+                except Exception:
+                    pass
+
+            # 5. 默认选中的会议室：首选 > 容量/设备匹配 > 第一个
             default_room = str(preferred_room_id) if preferred_room_id else None
             if not default_room and room_options:
                 default_room = room_options[0]["value"]
@@ -803,33 +850,30 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         default_room = str(r["id"])
                         break
 
-            # 6. 生成完整时段选项（30分钟粒度，8:00-20:00）
+            # 6. 生成独立起始/结束时间选项（30分钟粒度，8:00-20:00）
             from datetime import datetime as dt, timedelta
 
-            slot_duration = int(
-                (dt.strptime(parsed_end, "%H:%M") - dt.strptime(parsed_start, "%H:%M"))
-                .total_seconds() / 60
-            )
-            if slot_duration <= 0:
-                slot_duration = 60
-
-            time_options = []
+            # 起始时间选项
+            start_options = []
             t = dt.strptime("08:00", "%H:%M")
-            max_t = dt.strptime("20:00", "%H:%M")
-            while t + timedelta(minutes=slot_duration) <= max_t:
-                s_str = t.strftime("%H:%M")
-                e_str = (t + timedelta(minutes=slot_duration)).strftime("%H:%M")
-                is_rec = (s_str == parsed_start)
-                label = f"{s_str}-{e_str}"
-                if is_rec:
-                    label += " ✨ 推荐"
-                time_options.append({"value": f"{s_str}-{e_str}", "label": label})
+            max_t = dt.strptime("19:30", "%H:%M")
+            while t <= max_t:
+                val = t.strftime("%H:%M")
+                is_rec = (val == parsed_start)
+                label = val if not is_rec else f"{val} ✨"
+                start_options.append({"value": val, "label": label})
                 t += timedelta(minutes=30)
 
-            # 确保推荐时段在列表中（边界情况）
-            rec_val = f"{parsed_start}-{parsed_end}"
-            if rec_val not in [o["value"] for o in time_options]:
-                time_options.insert(0, {"value": rec_val, "label": f"{rec_val} ✨ 推荐"})
+            # 结束时间选项（默认 = 起始 + 时长）
+            end_options = []
+            t = dt.strptime("08:30", "%H:%M")
+            max_t = dt.strptime("20:00", "%H:%M")
+            while t <= max_t:
+                val = t.strftime("%H:%M")
+                is_rec = (val == parsed_end)
+                label = val if not is_rec else f"{val} ✨"
+                end_options.append({"value": val, "label": label})
+                t += timedelta(minutes=30)
 
             # 7. 构建描述文字
             time_desc = {
@@ -837,8 +881,8 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 "14:00": "下午", "18:00": "晚上",
             }
             friendly_time = ""
-            for t, label in time_desc.items():
-                if parsed_start.startswith(t):
+            for k, label in time_desc.items():
+                if parsed_start.startswith(k):
                     friendly_time = label
                     break
             if not friendly_time:
@@ -852,23 +896,31 @@ class TicketDispatchSubAgent(BaseSubAgent):
             except Exception:
                 date_label = parsed_date
 
-            desc_parts = [f"📅 {date_label}  {friendly_time} {parsed_start}-{parsed_end}"]
-            if user_prefs.get("total_bookings", 0) > 0:
+            dur_min = int(
+                (dt.strptime(parsed_end, "%H:%M") - dt.strptime(parsed_start, "%H:%M"))
+                .total_seconds() / 60
+            )
+            desc_parts = [f"📅 {date_label}  {friendly_time} {parsed_start}-{parsed_end}（{dur_min}分钟）"]
+            if is_explicit_duration:
+                desc_parts.append(f"⏱️ 按您要求的时长：{dur_min} 分钟")
+            elif user_prefs.get("total_bookings", 0) > 0:
                 desc_parts.append(
-                    f"💡 根据您的历史记录，推荐时长 {user_prefs['avg_duration_minutes']} 分钟"
+                    f"💡 根据历史记录，推荐时长 {user_prefs['avg_duration_minutes']} 分钟"
                 )
             if availability.get("conflict"):
                 c = availability["conflict"]
                 desc_parts.append(
-                    f"⚠️ {c['room_name']} 在 {c['time']} 已被「{c['booking_title']}」占用，"
-                    f"已自动推荐其他可用会议室"
+                    f"⚠️ {c['room_name']} 在 {c['time']} 已被「{c['booking_title']}」占用"
                 )
 
-            # 构建 room hint
-            room_hint = ""
+            # 追加设备/冲突提示到 room_hint
             if requested_amenity_keys:
-                room_hint = f"🔍 已筛选支持: {', '.join(requested_amenity_keys)}"
-            elif availability.get("conflict"):
+                amenity_str = ", ".join(requested_amenity_keys)
+                room_hint = (
+                    f"{room_hint} | 🔍 设备: {amenity_str}" if room_hint
+                    else f"🔍 筛选设备: {amenity_str}"
+                )
+            if availability.get("conflict") and not room_hint:
                 room_hint = "已根据可用性筛选"
 
             card = {
@@ -888,10 +940,18 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         "value": parsed_date, "required": True,
                     },
                     {
-                        "key": "time_slot", "label": "时间段", "type": "select",
-                        "options": time_options,
-                        "value": time_options[0]["value"],
+                        "key": "start_time", "label": "开始时间", "type": "select",
+                        "options": start_options,
+                        "value": parsed_start,
                         "required": True,
+                        "hint": "选择会议开始时间",
+                    },
+                    {
+                        "key": "end_time", "label": "结束时间", "type": "select",
+                        "options": end_options,
+                        "value": parsed_end,
+                        "required": True,
+                        "hint": f"推荐时长 {dur_min} 分钟",
                     },
                     {
                         "key": "title", "label": "会议主题", "type": "text",

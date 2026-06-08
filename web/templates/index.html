@@ -1233,11 +1233,10 @@
                 }
             } else {
                 if (actionUrl.includes('/book')) {
-                    const [start, end] = (values.time_slot || '14:00-15:00').split('-');
                     body = {
                         date: values.date || new Date().toISOString().split('T')[0],
-                        start_time: start,
-                        end_time: end,
+                        start_time: values.start_time || '14:00',
+                        end_time: values.end_time || '15:00',
                         title: values.title || '会议',
                         booked_by: values.booked_by || 'web_user',
                         description: values.description || '',
