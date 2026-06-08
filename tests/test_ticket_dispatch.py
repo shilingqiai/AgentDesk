@@ -163,22 +163,6 @@ class TestTicketDispatch:
 
         assert params["ticket_type"] == "it_fault"
 
-    def test_extract_json_markdown(self):
-        """从 markdown 代码块中提取 JSON"""
-        from agents.sub_agents.ticket_dispatch import TicketDispatchSubAgent
-
-        content = '```json\n{"key":"value"}\n```'
-        result = TicketDispatchSubAgent._extract_json(content)
-        assert result == '{"key":"value"}'
-
-    def test_extract_json_plain(self):
-        """从纯文本中提取 JSON"""
-        from agents.sub_agents.ticket_dispatch import TicketDispatchSubAgent
-
-        content = '前置文字{"key":"value"}后缀文字'
-        result = TicketDispatchSubAgent._extract_json(content)
-        assert result == '{"key":"value"}'
-
     def test_build_extra_payload_leave(self):
         """构建请假扩展字段"""
         from agents.sub_agents.ticket_dispatch import TicketDispatchSubAgent

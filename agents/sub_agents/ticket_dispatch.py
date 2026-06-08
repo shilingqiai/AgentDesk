@@ -22,8 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Literal
 from datetime import datetime
+
+from pydantic import BaseModel, Field
 
 from agents.base_sub_agent import BaseSubAgent
 from agents.a2a.protocol import AgentMessage
@@ -32,6 +34,47 @@ from agents.orchestrator.agent_registry import agent_registry
 from config.model_provider import create_chat_model
 
 logger = logging.getLogger("agent.ticket_dispatch")
+
+
+# ============================================================
+# Pydantic 结构化输出 Schema（v3 Function Calling）
+# ============================================================
+
+class TicketExtra(BaseModel):
+    """工单扩展字段"""
+    leave_type: str = Field(default="", description="请假类型：年假|病假|事假|调休|婚假|产假（仅 leave）")
+    start_date: str = Field(default="", description="开始日期 YYYY-MM-DD（仅 leave）")
+    end_date: str = Field(default="", description="结束日期 YYYY-MM-DD（仅 leave）")
+    total_days: int = Field(default=0, description="请假天数（仅 leave）")
+    expense_type: str = Field(default="", description="报销类型（仅 expense）")
+    amount: float = Field(default=0.0, description="报销金额（仅 expense）")
+    has_invoice: bool = Field(default=False, description="是否有发票（仅 expense）")
+    service_type: str = Field(default="", description="服务类型：会议室|快递|资产|访客（仅 admin）")
+    time_slot: str = Field(default="", description="时间段如 14:00-16:00（仅 admin）")
+    suggested_engineer_skill: str = Field(default="", description="建议工程师技能（仅 it_fault）")
+    affected_users: int = Field(default=1, description="受影响用户数（仅 it_fault）")
+
+
+class TicketParams(BaseModel):
+    """工单参数提取的结构化输出（Function Calling）"""
+    ticket_type: Literal["it_fault", "leave", "expense", "admin"] = Field(
+        description="工单类型"
+    )
+    title: str = Field(description="工单标题，简洁明了，不超过20字")
+    description: str = Field(description="工单详细描述")
+    category: str = Field(description="具体分类，从可用分类中选")
+    priority: Literal["P0", "P1", "P2", "P3"] = Field(
+        default="P2", description="优先级"
+    )
+    extra: TicketExtra = Field(default_factory=TicketExtra, description="扩展字段")
+
+
+class CardIntent(BaseModel):
+    """卡片回复意图分类（Function Calling）"""
+    intent: Literal["confirm", "modify", "cancel", "new_topic"] = Field(
+        description="用户意图：confirm=确认执行, modify=修改参数, cancel=取消放弃, new_topic=换话题"
+    )
+    reason: str = Field(default="", description="分类理由，一句话")
 
 
 # ============================================================
@@ -111,6 +154,13 @@ class TicketDispatchSubAgent(BaseSubAgent):
     def __init__(self):
         super().__init__()
         self.llm = create_chat_model(temperature=0.1)
+        # v3: 结构化输出 LLM — 原生 Function Calling，无需 JSON 解析
+        self.extract_llm = create_chat_model(temperature=0).with_structured_output(
+            TicketParams
+        )
+        self.intent_llm = create_chat_model(
+            model_type="router", temperature=0
+        ).with_structured_output(CardIntent)
         self._db_router = None
 
     @property
@@ -1452,26 +1502,13 @@ class TicketDispatchSubAgent(BaseSubAgent):
         conversation_history: str = "",
     ) -> dict:
         """
-        使用 LLM 从用户输入中提取工单参数
+        使用 LLM Function Calling 从用户输入中提取工单参数。
 
-        核心改进（v2）：
-        - 自动识别 ticket_type
-        - 针对不同 ticket_type 提取不同字段
-        - JSON 解析失败时使用 json_repair 修复
-        - 最多重试 2 次
+        v3 改进：
+        - 使用 with_structured_output(TicketParams) 替代 prompt→JSON 解析
+        - 无需 _extract_json()、json_repair、重试逻辑
+        - 模型原生保证结构化输出，可靠性 100%
         """
-        history_section = ""
-        if conversation_history:
-            history_section = (
-                f"## 对话历史\n{conversation_history}\n\n"
-                f"注意：结合上下文理解用户意图。\n\n"
-            )
-
-        ticket_type_options = "\n".join([
-            f"  - {k}: {v['label']}（如：{'/'.join(v['category_options'][:3])}...）"
-            for k, v in TICKET_TYPE_CONFIG.items()
-        ])
-
         from datetime import datetime as dt_now, timedelta
         today_dt = dt_now.now()
         today_str = today_dt.strftime("%Y-%m-%d")
@@ -1480,93 +1517,62 @@ class TicketDispatchSubAgent(BaseSubAgent):
         tomorrow_str = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d")
         day_after_str = (today_dt + timedelta(days=2)).strftime("%Y-%m-%d")
 
-        prompt = f"""你是一个企业工单系统的参数提取器。识别工单类型并提取信息。
+        ticket_type_options = "\n".join([
+            f"  - {k}: {v['label']}（如：{'/'.join(v['category_options'][:3])}...）"
+            for k, v in TICKET_TYPE_CONFIG.items()
+        ])
 
-## 重要：今天的日期是 {today_label}
-请基于今天日期计算相对日期：
-- "下周2" → 下周周二 → 从今天算起，找到下周二的日期（YYYY-MM-DD）
-- "明天" → {tomorrow_str}
-- "后天" → {day_after_str}
-- "3天" / "请假3天" → 开始日期通常为当天或明天，结束日期 = 开始日期 + 天数-1
+        history_section = ""
+        if conversation_history:
+            history_section = (
+                f"## 对话历史\n{conversation_history}\n\n"
+                f"结合上下文理解用户意图。\n\n"
+            )
 
-{history_section}
-## 工单类型
-{ticket_type_options}
+        system_prompt = (
+            "你是一个企业工单系统的参数提取器。识别工单类型并提取信息。\n"
+            f"今天的日期是 {today_label}。\n"
+            f"明天={tomorrow_str}，后天={day_after_str}。\n"
+            "- '下周2' → 下周周二 → 从今天算起找到下周二的日期（YYYY-MM-DD）\n"
+            "- '3天' / '请假3天' → 开始日期=当天或明天，结束日期=开始日期+天数-1\n"
+            f"默认 priority={urgency}（用户未指定时用 P2）。\n"
+            "leave 类型的 start_date/end_date 必须按今天日期推算，不能留空。\n"
+            "\n"
+            "优先级判断：\n"
+            "P0: 系统宕机、核心业务中断、多人受影响\n"
+            "P1: 影响工作效率但可暂时绕过\n"
+            "P2: 一般故障/申请，有替代方案\n"
+            "P3: 咨询、非紧急问题"
+        )
 
-## 用户输入
-{user_input}
+        try:
+            result: TicketParams = await self.extract_llm.ainvoke([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": (
+                    f"## 工单类型\n{ticket_type_options}\n\n"
+                    f"{history_section}"
+                    f"## 用户输入\n{user_input}\n\n"
+                    f"提取工单参数。"
+                )},
+            ])
 
-## 默认值
-- 紧急度: {urgency}
-- 如用户未明确指定，priority 默认为 P2
-- leave 类型的 start_date/end_date 必须按今天日期推算，不能留空
+            # 验证 ticket_type
+            ticket_type = result.ticket_type
+            if ticket_type not in TICKET_TYPE_CONFIG:
+                ticket_type = "it_fault"
 
-## 输出 JSON（严格按此格式，不要其他文字）
-{{
-    "ticket_type": "it_fault|leave|expense|admin",
-    "title": "工单标题（简洁，<20字）",
-    "description": "工单详细描述",
-    "category": "具体分类（从上述分类中选）",
-    "priority": "P0|P1|P2|P3",
-    "extra": {{
-        "leave_type": "年假|病假|事假（仅 leave 类型）",
-        "start_date": "开始日期（仅 leave 类型，YYYY-MM-DD）",
-        "end_date": "结束日期（仅 leave 类型，YYYY-MM-DD）",
-        "total_days": 0,
-        "expense_type": "差旅费|办公用品...（仅 expense 类型）",
-        "amount": 0.0,
-        "has_invoice": true,
-        "service_type": "会议室|快递...（仅 admin 类型）",
-        "time_slot": "时间段（仅 admin 类型）"
-    }}
-}}
+            return {
+                "ticket_type": ticket_type,
+                "title": result.title,
+                "description": result.description,
+                "category": result.category,
+                "priority": result.priority,
+                "extra": result.extra.model_dump(),
+            }
 
-优先级判断标准：
-- P0: 系统宕机、核心业务中断、多人受影响
-- P1: 影响工作效率但可暂时绕过
-- P2: 一般故障/申请，有替代方案
-- P3: 咨询、非紧急问题"""
-
-        for attempt in range(2):
-            try:
-                response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
-                content = response.content.strip()
-
-                # 提取 JSON（兼容 markdown 代码块）
-                content = self._extract_json(content)
-
-                data = json.loads(content)
-
-                # 验证 ticket_type
-                ticket_type = data.get("ticket_type", "it_fault")
-                if ticket_type not in TICKET_TYPE_CONFIG:
-                    ticket_type = "it_fault"
-
-                return {
-                    "ticket_type": ticket_type,
-                    "title": data.get("title", user_input[:30]),
-                    "description": data.get("description", user_input),
-                    "category": data.get("category", "其他"),
-                    "priority": data.get("priority", "P2"),
-                    "extra": data.get("extra", {}),
-                }
-
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                self.logger.warning(f"参数提取尝试 {attempt + 1}/2 失败: {e}")
-
-                # 尝试 json_repair
-                if attempt == 0:
-                    try:
-                        from json_repair import repair_json
-                        content = repair_json(content)
-                        self.logger.info("JSON 修复成功，重试解析")
-                        # 继续循环以重新解析
-                    except ImportError:
-                        pass
-
-        # 所有重试失败 → 规则兜底
-        self.logger.warning("LLM 参数提取全部失败，使用规则兜底")
-        return self._fallback_extract(user_input, urgency)
+        except Exception as e:
+            self.logger.warning(f"Function Calling 参数提取失败: {e}，使用规则兜底")
+            return self._fallback_extract(user_input, urgency)
 
     def _fallback_extract(self, user_input: str, urgency: str) -> dict:
         """规则兜底：基于关键词快速推断 ticket_type"""
@@ -1598,20 +1604,6 @@ class TicketDispatchSubAgent(BaseSubAgent):
             "priority": "P2",
             "extra": {},
         }
-
-    @staticmethod
-    def _extract_json(content: str) -> str:
-        """从 LLM 响应中提取 JSON 内容"""
-        if "```json" in content:
-            return content.split("```json")[1].split("```")[0].strip()
-        elif "```" in content:
-            return content.split("```")[1].split("```")[0].strip()
-        # 尝试找到第一个 { 和最后一个 }
-        brace_start = content.find("{")
-        brace_end = content.rfind("}")
-        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-            return content[brace_start:brace_end + 1].strip()
-        return content
 
     @staticmethod
     def _build_extra_payload(ticket_type: str, params: dict) -> dict:
@@ -1715,7 +1707,9 @@ class TicketDispatchSubAgent(BaseSubAgent):
         self, user_text: str, card: dict, ticket_type: str,
     ) -> str:
         """
-        用轻量 LLM 分类用户对卡片的回复意图。
+        用 Function Calling 分类用户对卡片的回复意图。
+
+        v3: with_structured_output(CardIntent) → 原生结构化输出，无字符串匹配
 
         Returns: "confirm" | "modify" | "cancel" | "new_topic"
         """
@@ -1730,40 +1724,43 @@ class TicketDispatchSubAgent(BaseSubAgent):
         else:
             topic_examples = "'预定会议室''VPN怎么连''打印机坏了''你是AI吗'"
 
-        prompt = (
+        system_prompt = (
             "你是企业服务台的意图分类器。用户看到了一张确认卡片，然后回复了一句话。\n"
             "请判断用户的意图。\n\n"
-            f"卡片类型：{ticket_type}\n"
-            f"卡片标题：{card.get('title', '')}\n"
-            f"卡片描述：{card_desc[:300]}\n"
-            f"卡片字段：{json.dumps([f.get('label','') for f in card_fields], ensure_ascii=False)}\n\n"
-            f"用户回复：\"{user_text}\"\n\n"
-            "分类为以下之一（只输出一个单词）：\n"
+            "分类标准：\n"
             "- confirm: 用户确认/同意卡片内容，要求执行操作。"
             "包括简短确认（'好的''行''ok'）和长句确认（'行吧那就帮我定了吧谢谢你'）\n"
             "- modify: 用户想修改卡片的某个参数（改时间、换房间、改金额、换主题等）\n"
             "- cancel: 用户想取消/放弃/不要这张卡片（'算了''不定了''取消吧''不要了'）。"
             "注意：cancel 是指放弃卡片操作，不是请假/离开的意思。\n"
             "- new_topic: 用户完全换了话题，问的是和这张卡片不相关的事"
-            f"（{topic_examples}）。"
-            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。\n\n"
-            "只输出一个单词："
+            f"（{topic_examples}）。\n"
+            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。"
         )
 
-        from config.model_provider import create_chat_model
-        llm = create_chat_model(model_type="router", temperature=0)
-        response = await llm.ainvoke(prompt)
-        text = response.content.strip().lower()
+        try:
+            result: CardIntent = await self.intent_llm.ainvoke([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": (
+                    f"卡片类型：{ticket_type}\n"
+                    f"卡片标题：{card.get('title', '')}\n"
+                    f"卡片描述：{card_desc[:300]}\n"
+                    f"卡片字段：{json.dumps([f.get('label','') for f in card_fields], ensure_ascii=False)}\n\n"
+                    f"用户回复：\"{user_text}\"\n\n"
+                    f"请分类用户的意图。"
+                )},
+            ])
 
-        for intent in ["confirm", "modify", "cancel", "new_topic"]:
-            if intent in text:
-                logger.info(f"[classify_card_response] → {intent} (raw: {text[:50]})")
-                return intent
+            intent = result.intent
+            logger.info(
+                f"[classify_card_response] → {intent} (reason: {result.reason[:60]})"
+            )
+            return intent
 
-        # 默认：短回复 → confirm，长回复 → new_topic
-        fallback = "confirm" if len(user_text) <= 10 else "new_topic"
-        logger.info(f"[classify_card_response] fallback → {fallback} (raw: {text[:50]})")
-        return fallback
+        except Exception as e:
+            logger.warning(f"[classify_card_response] 结构化输出失败: {e}，fallback")
+            fallback = "confirm" if len(user_text) <= 10 else "new_topic"
+            return fallback
 
     async def execute_card(self, card: dict, user_text: str) -> str:
         """
