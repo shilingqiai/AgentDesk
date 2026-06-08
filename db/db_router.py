@@ -1,22 +1,28 @@
 """
 数据库路由器 — 企业员工AI服务台
 
-提供统一的知识库数据访问入口。
+提供统一的知识库 + 工单数据访问入口。
 """
 from .base import SessionManager
 from .repositories import KnowledgeRepository
+from .repositories.ticket_repository import TicketRepository
 
 
 class DatabaseRouter:
-    """数据库路由器"""
+    """数据库路由器 — 统一管理所有 Repository"""
 
     def __init__(self, db_path: str = 'sqlite:///data/ticket_dispatch.db'):
         self.session_manager = SessionManager(db_path)
-        self.knowledge_repo = KnowledgeRepository(self.session_manager)
+        self._knowledge_repo = KnowledgeRepository(self.session_manager)
+        self._ticket_repo = TicketRepository(self.session_manager)
 
     @property
     def knowledge(self) -> KnowledgeRepository:
-        return self.knowledge_repo
+        return self._knowledge_repo
+
+    @property
+    def ticket(self) -> TicketRepository:
+        return self._ticket_repo
 
     def close(self):
         self.session_manager.close()

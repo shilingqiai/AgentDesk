@@ -148,57 +148,90 @@ class TaskPlanner:
         intent_result: IntentResult,
         user_input: str,
     ) -> ExecutionPlan:
-        """LLM 规划：复杂/低置信度场景"""
-        try:
-            # 获取 Agent 列表
-            agent_list = "（从注册中心获取）"
-            if self.agent_registry:
-                agent_list = self.agent_registry.get_routing_descriptions()
+        """LLM 规划：复杂/低置信度场景（v2: JSON 修复 + 重试）"""
+        # 获取 Agent 列表
+        agent_list = "（从注册中心获取）"
+        if self.agent_registry:
+            agent_list = self.agent_registry.get_routing_descriptions()
 
-            intent_info = (
-                f"类别: {intent_result.category}\n"
-                f"紧急度: {intent_result.urgency}\n"
-                f"置信度: {intent_result.confidence:.0%}\n"
-                f"摘要: {intent_result.summary}\n"
-                f"推荐Agent: {intent_result.target_agent or '无'}"
-            )
+        intent_info = (
+            f"类别: {intent_result.category}\n"
+            f"紧急度: {intent_result.urgency}\n"
+            f"置信度: {intent_result.confidence:.0%}\n"
+            f"摘要: {intent_result.summary}\n"
+            f"推荐Agent: {intent_result.target_agent or '无'}"
+        )
 
-            chain = self.plan_prompt | self.llm
-            response = await chain.ainvoke({
-                "agent_list": agent_list,
-                "intent_info": intent_info,
-                "user_input": user_input,
-            })
+        last_content = ""
 
-            content = response.content.strip()
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
+        for attempt in range(2):
+            try:
+                chain = self.plan_prompt | self.llm
+                response = await chain.ainvoke({
+                    "agent_list": agent_list,
+                    "intent_info": intent_info,
+                    "user_input": user_input,
+                })
 
-            data = json.loads(content)
-            steps = [
-                PlanStep(
-                    agent_id=s.get("agent_id", ""),
-                    task=s.get("task", ""),
-                    params=s.get("params", {}),
-                    depends_on=s.get("depends_on"),
+                content = response.content.strip()
+                last_content = content
+
+                # 提取 JSON
+                content = self._extract_json(content)
+
+                data = json.loads(content)
+                steps = [
+                    PlanStep(
+                        agent_id=s.get("agent_id", ""),
+                        task=s.get("task", ""),
+                        params=s.get("params", {}),
+                        depends_on=s.get("depends_on"),
+                    )
+                    for s in data.get("steps", [])
+                ]
+
+                return ExecutionPlan(
+                    steps=steps,
+                    parallel_groups=[[i] for i in range(len(steps))],
+                    needs_human_review=data.get("needs_human_review", False),
+                    reasoning=data.get("reasoning", ""),
                 )
-                for s in data.get("steps", [])
-            ]
 
-            return ExecutionPlan(
-                steps=steps,
-                parallel_groups=[[i] for i in range(len(steps))],
-                needs_human_review=data.get("needs_human_review", False),
-                reasoning=data.get("reasoning", ""),
-            )
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.warning(f"LLM 规划 JSON 解析失败 (attempt {attempt + 1}/2): {e}")
 
-        except Exception as e:
-            logger.error(f"LLM 规划失败: {e}，使用简单兜底")
-            return ExecutionPlan(
-                steps=[],
-                parallel_groups=[],
-                needs_human_review=False,
-                reasoning=f"规划失败: {str(e)}",
-            )
+                if attempt == 0:
+                    try:
+                        from json_repair import repair_json
+                        last_content = repair_json(last_content)
+                        logger.info("规划 JSON 修复成功，重试解析")
+                    except ImportError:
+                        pass
+                    except Exception as repair_err:
+                        logger.warning(f"规划 JSON 修复也失败: {repair_err}")
+
+            except Exception as e:
+                logger.error(f"LLM 规划调用失败: {e}")
+                break
+
+        # 所有重试失败 → 兜底
+        logger.error("LLM 规划全部失败，使用简单兜底")
+        return ExecutionPlan(
+            steps=[],
+            parallel_groups=[],
+            needs_human_review=False,
+            reasoning=f"规划失败（2次重试）",
+        )
+
+    @staticmethod
+    def _extract_json(content: str) -> str:
+        """从 LLM 响应中提取 JSON 内容"""
+        if "```json" in content:
+            return content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            return content.split("```")[1].split("```")[0].strip()
+        brace_start = content.find("{")
+        brace_end = content.rfind("}")
+        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+            return content[brace_start:brace_end + 1].strip()
+        return content

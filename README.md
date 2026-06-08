@@ -1,6 +1,6 @@
 # 企业员工AI服务台
 
-基于 LangGraph + FAISS 的多 Agent 智能服务台。Hub & Spoke 架构，语义路由，RAG 知识自服务，支持 Web 端流式对话与飞书机器人集成。
+基于 LangGraph + FAISS 的多 Agent 智能服务台。Hub & Spoke 架构，语义路由，RAG 知识自服务，支持 Web 端流式对话、智能确认卡片、会议室管理、工单追踪与飞书机器人集成。
 
 ## 架构
 
@@ -14,11 +14,11 @@
     │         │         │
     ▼         ▼         ▼
 EnterpriseRAG  TicketDispatch  TaskPlanner
-(FAISS+LLM)  (工单创建)     (多Agent委派)
+(FAISS+LLM)  (工单创建+智能卡片)     (多Agent委派)
 ```
 
 - **fast** — 知识库问答（FAISS 向量检索 + LLM 合成），80% 请求仅需 2 次 LLM 调用
-- **action** — 工单创建与派发
+- **action** — 工单创建与派发，支持智能确认卡片
 - **complex** — 复合指令，多 Agent 协作
 - **clarification** — 语义路由不确定时主动反问，不猜测
 
@@ -30,15 +30,50 @@ EnterpriseRAG  TicketDispatch  TaskPlanner
 | Single Response | 子Agent 不直接回复用户，编排器统一合成 |
 | 语义路由 | Pydantic 结构化输出，confidence < 0.7 触发反问 |
 | EnterpriseRAG | 统一知识库 Agent，FAISS 跨领域检索（IT+HR+行政） |
+| 智能确认卡片 | 工单操作不直接执行，弹出预填卡片让用户确认 |
 | 三层控制 | AI / Hybrid / Deterministic，高风险操作人工审核 |
 | A2A 协议 | Agent 间标准化通信，MessageBus 全链路追踪 |
+
+## 功能亮点
+
+### 🤖 智能确认卡片
+
+告别"说句话就创建工单"的粗暴体验。系统返回结构化确认卡片，自动预填所有已知信息：
+
+- **时间智能解析** — "明天早上" → 📅 2026-06-09 09:00-10:30，"周五下午3点" → 自动识别
+- **用户偏好记忆** — 从历史预定中学习：常用会议室、偏好时长、常见主题
+- **冲突检测** — 会议室被占用时自动切换到空闲房间，提示备选时段
+- **IT RAG 优先** — 报修前先搜索知识库解决方案，解决了就不必创建工单
+- **最小化操作** — 卡片预填所有可推断信息，用户只需点"确认"
+
+### 🏢 会议室管理 (`/meeting-rooms`)
+
+真实会议室预定系统，不再是文本工单：
+
+- 5 间预设会议室（星空厅/银河厅/宇宙厅/创意坊/静思阁）
+- 日视图时间轴（08:00-20:00，30 分钟粒度）
+- 实时可用性查询，已占用时段灰色显示
+- 点击空白时段弹出预定弹窗
+
+### 📋 工单管理 (`/tickets`)
+
+- 统计面板 + 类型/状态/优先级筛选
+- 工单卡片展开查看详情（请假天数、报销金额、会议室时间等类型特有字段）
+- 状态下变更（created → resolved → closed）
+- 分页浏览
+
+### 🎨 前端技术
+
+- **Alpine.js 3.13** CDN 引入，零构建，保留 `python app.py` 单命令启动
+- SSE 流式对话，实时打字效果
+- 确认卡片在聊天气泡中渲染为交互式表单
 
 ## 技术栈
 
 - **编排**: LangGraph 1.0 (StateGraph + MemorySaver)
 - **LLM**: 阿里云 DashScope (qwen-max / qwen-mt-flash / text-embedding-v4)
 - **向量**: FAISS IndexFlatIP
-- **Web**: FastAPI + Jinja2 + 原生 JS (ReadableStream)
+- **Web**: FastAPI + Jinja2 + Alpine.js 3.13 + 原生 JS (ReadableStream)
 - **IM**: 飞书 WebSocket Bot (lark-oapi)
 - **DB**: SQLite + SQLAlchemy
 
@@ -73,8 +108,16 @@ python app.py --mode web --port 8001
 ├── services/                     # KnowledgeService, Embedding
 ├── db/                           # 数据模型 + Repository
 ├── api/                          # REST API
+│   ├── meeting_rooms.py          # 会议室预定 API
+│   ├── tickets.py                # 工单查询 API
+│   └── knowledge.py              # 知识库 API
 ├── web/                          # 前端页面 + 路由
+│   └── templates/
+│       ├── index.html            # 主对话页面（含智能卡片渲染）
+│       ├── meeting_rooms.html    # 会议室管理 SPA
+│       └── tickets.html          # 工单管理 SPA
 ├── integrations/feishu/          # 飞书 Bot
+├── tests/                        # 测试套件 (66 tests)
 └── config/                       # 模型工厂 + 配置
 ```
 
@@ -82,10 +125,16 @@ python app.py --mode web --port 8001
 
 | 端点 | 说明 |
 |------|------|
-| `POST /chat/stream` | Web 流式聊天 |
+| `POST /chat/stream` | Web 流式聊天（SSE） |
 | `POST /api/knowledge/search` | 向量搜索 |
 | `GET /api/agents/list` | Agent 列表 |
 | `POST /api/task/classify` | 语义路由分类 |
+| `GET /api/tickets` | 工单列表 + 筛选 |
+| `PATCH /api/tickets/{id}/status` | 更新工单状态 |
+| `GET /api/meeting-rooms` | 会议室列表 |
+| `GET /api/meeting-rooms/{id}/availability` | 会议室可用时段 |
+| `POST /api/meeting-rooms/{id}/book` | 预定会议室 |
+| `DELETE /api/meeting-rooms/bookings/{id}` | 取消预定 |
 | `GET /docs` | Swagger 文档 |
 
 ## 流式令牌
@@ -94,8 +143,17 @@ python app.py --mode web --port 8001
 [THINKING] 🔍 正在分析...    → 思考动画
 [ROUTE] 🔍 极速通道         → 轨道判定
 [FAST] 📚 企业知识库检索     → 轨道入口
-[STREAM]回答文字片段         → 流式打字
+[ACTION] 📋 工单操作         → 轨道入口
+[STREAM] 回答文字片段        → 流式打字
+[CARD] {"type":"confirm",...} → 智能确认卡片
 [DONE]                       → 完成
+```
+
+## 测试
+
+```bash
+pytest tests/ -v
+# 66 passed, 46 warnings
 ```
 
 ## 文档

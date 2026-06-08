@@ -228,7 +228,20 @@ async def action_track_node(state: TicketState) -> TicketState:
             "success": result.success, "payload": result.payload, "error": result.error,
         }
 
-        if result.success and result.payload.get("direct_response"):
+        if result.success and result.payload.get("return_card"):
+            # 确认卡片模式
+            import json as _json
+            card = result.payload.get("card", {})
+            state["final_response"] = (
+                "📋 **请确认以下信息**\n\n"
+                + card.get("description", "")
+                + "\n[CARD]" + _json.dumps(card, ensure_ascii=False)
+            )
+            state["agent_results"]["ticket_dispatch"] = {
+                "success": True, "payload": result.payload, "error": None,
+                "card": card,
+            }
+        elif result.success and result.payload.get("direct_response"):
             state["final_response"] = result.payload["direct_response"]
         elif result.error:
             state["final_response"] = (
@@ -436,8 +449,28 @@ class OrchestrationWorkflowRunner:
     def __init__(self):
         self._ensure_agents_loaded()
         self.workflow = build_orchestration_workflow()
-        self.checkpointer = MemorySaver()
+        self.checkpointer = self._create_checkpointer()
         self.app = self.workflow.compile(checkpointer=self.checkpointer)
+
+    @staticmethod
+    def _create_checkpointer():
+        """创建持久化检查点 — SqliteSaver 支持重启恢复"""
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            import os
+            db_dir = "data"
+            os.makedirs(db_dir, exist_ok=True)
+            checkpointer = SqliteSaver.from_conn_string(
+                f"sqlite:///{db_dir}/checkpoints.db"
+            )
+            logger.info("✓ 使用 SqliteSaver 持久化会话状态")
+            return checkpointer
+        except ImportError:
+            logger.warning("SqliteSaver 不可用，降级为 MemorySaver（不持久化）")
+            return MemorySaver()
+        except Exception as e:
+            logger.warning(f"SqliteSaver 初始化失败: {e}，降级为 MemorySaver")
+            return MemorySaver()
 
     @staticmethod
     def _ensure_agents_loaded():
@@ -459,12 +492,15 @@ class OrchestrationWorkflowRunner:
         """
         流式运行编排工作流。
 
+        v3 改进：fast_track 使用真流式（LLM token 级推送），
+        其他轨道因执行速度快保留伪流式。
+
         输出令牌：
           [THINKING] <文字>            — 更新"思考中..."文字
           [ROUTE] <轨道描述>           — 路由判定结果
           [CLARIFY] <反问文字>         — AI 反问用户澄清意图
           [FAST]/[ACTION]/[COMPLEX]    — 轨道入口
-          [STREAM]<文字片段>           — 流式回答片段
+          [STREAM]<文字片段>           — 流式回答片段（fast_track 为真流式）
           [DONE]                       — 完成
         """
         initial_state = create_initial_state(user_input, thread_id)
@@ -472,39 +508,84 @@ class OrchestrationWorkflowRunner:
 
         yield "[THINKING] 🔍 正在分析您的问题...\n"
 
-        async for event in self.app.astream(initial_state, config):
+        # 先用 route_node 拿到路由结果
+        from agents.orchestrator.router import Router
+        from agents.orchestrator.agent_registry import agent_registry
+
+        routed_state = await route_node(initial_state)
+        track = routed_state.get("track", "clarify")
+        confidence = routed_state.get("confidence", 0)
+
+        # --- 路由结果 ---
+        if track == "clarify" or confidence < 0.3:
+            yield "[ROUTE] 🤔 AI 需要确认您的意图\n"
+            yield "[THINKING] 💭 正在组织追问...\n"
+        else:
+            track_names = {
+                "fast": "🔍 极速通道 · 企业知识库问答",
+                "action": "⚡ 动作通道 · 工单派发",
+                "complex": "🧩 复杂通道 · 多步骤编排",
+            }
+            yield f"[ROUTE] {track_names.get(track, track)}\n"
+
+            track_thinking = {
+                "fast": "📚 向量检索知识库，生成回答...",
+                "action": "⚡ 分析工单需求，提取参数...",
+                "complex": "🧩 分析复合指令，制定计划...",
+            }
+            yield f"[THINKING] {track_thinking.get(track, '处理中...')}\n"
+
+        if routed_state.get("needs_human_review"):
+            yield "[THINKING] ⚠️ 此操作可能需要人工审核...\n"
+
+        # --- 真流式：fast_track ---
+        if track == "fast":
+            yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
+            yield "[THINKING] ✍️ 正在基于检索结果生成回答...\n"
+
+            try:
+                from agents.sub_agents.enterprise_rag import EnterpriseRAGAgent
+
+                rag = EnterpriseRAGAgent()
+                await rag._ensure_initialized()
+
+                # 检索
+                docs = await rag.knowledge_service.search(user_input, top_k=5)
+
+                if not docs:
+                    final = routed_state.get("final_response", "")
+                    if not final:
+                        # 运行完整节点
+                        result_state = await fast_track_node(routed_state)
+                        final = result_state.get("final_response", "")
+                    yield f"[STREAM]{final}\n"
+                else:
+                    # 真流式：逐 token yield
+                    conversation_history = _build_conversation_context(
+                        routed_state.get("messages", []),
+                    )
+                    async for token in rag._synthesize_stream(
+                        user_input, docs, conversation_history,
+                    ):
+                        yield f"[STREAM]{token}\n"
+
+                yield "[DONE]\n"
+                return
+
+            except Exception as e:
+                logger.error(f"[Stream] fast_track 流式失败: {e}，降级为完整节点")
+                result_state = await fast_track_node(routed_state)
+                resp = result_state.get("final_response", "处理出错，请重试。")
+                yield f"[STREAM]{resp}\n"
+                yield "[DONE]\n"
+                return
+
+        # --- 其他轨道：使用 LangGraph astream（完整节点模式）---
+        # 使用已路由的状态继续执行
+        async for event in self.app.astream(routed_state, config):
             for node_name, node_state in event.items():
-
-                # --- 路由结果 ---
-                if node_name == "route":
-                    track = node_state.get("track", "")
-                    confidence = node_state.get("confidence", 0)
-
-                    if track == "clarify":
-                        yield "[ROUTE] 🤔 AI 需要确认您的意图\n"
-                        yield "[THINKING] 💭 正在组织追问...\n"
-                    else:
-                        track_names = {
-                            "fast": "🔍 极速通道 · 企业知识库问答",
-                            "action": "⚡ 动作通道 · 工单派发",
-                            "complex": "🧩 复杂通道 · 多步骤编排",
-                        }
-                        yield f"[ROUTE] {track_names.get(track, track)}\n"
-
-                        track_thinking = {
-                            "fast": "📚 向量检索知识库，生成回答...",
-                            "action": "⚡ 分析工单需求，提取参数...",
-                            "complex": "🧩 分析复合指令，制定计划...",
-                        }
-                        yield f"[THINKING] {track_thinking.get(track, '处理中...')}\n"
-
-                    if node_state.get("needs_human_review"):
-                        yield "[THINKING] ⚠️ 此操作可能需要人工审核...\n"
-
-                # --- 轨道入口 ---
                 if node_name == "fast_track":
                     yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
-                    yield "[THINKING] ✍️ 正在基于检索结果生成回答...\n"
                 elif node_name == "action_track":
                     yield "[ACTION] ⚡ 动作通道 · 工单派发\n"
                     yield "[THINKING] 📝 正在创建工单...\n"
@@ -515,14 +596,21 @@ class OrchestrationWorkflowRunner:
                     yield "[CLARIFY] 🤔 AI 需要确认您的意图\n"
                     yield "[THINKING] 💬 正在生成反问引导...\n"
 
-                # --- 流式输出 ---
-                if node_name in ("fast_track", "action_track", "complex_track", "clarification"):
+                # 非 fast_track 的流式输出
+                if node_name in ("action_track", "complex_track", "clarification"):
                     resp = node_state.get("final_response", "")
                     if resp:
-                        for i in range(0, len(resp), STREAM_CHUNK_SIZE):
-                            chunk = resp[i:i + STREAM_CHUNK_SIZE]
-                            yield f"[STREAM]{chunk}\n"
-                            await asyncio.sleep(STREAM_DELAY)
+                        # 检查是否包含确认卡片
+                        if "[CARD]" in resp:
+                            parts = resp.split("[CARD]", 1)
+                            text_part = parts[0].strip()
+                            card_part = parts[1].strip() if len(parts) > 1 else ""
+                            if text_part:
+                                yield f"[STREAM]{text_part}\n"
+                            if card_part:
+                                yield f"[CARD]{card_part}\n"
+                        else:
+                            yield f"[STREAM]{resp}\n"
 
         yield "[DONE]\n"
 

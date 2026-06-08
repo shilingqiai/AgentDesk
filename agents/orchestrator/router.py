@@ -150,13 +150,15 @@ class Router:
                 "  例：'VPN怎么连' '请假政策是什么' '食堂在哪' '病假'\n"
                 "  注意：短追问（≤5字）如'病假''第二步呢'结合对话历史通常走此轨道\n\n"
                 "**action** — 需要调接口/创建工单/提交申请/执行操作\n"
-                "  例：'帮我提交一个网络故障工单' '申请一台新电脑'\n\n"
+                "  例：'帮我提交一个网络故障工单' '申请一台新电脑'\n"
+                "  例：'我想请假3天' '报销差旅费500元' '帮我预定会议室'\n"
+                "  注意：请假/报销/预定/申请等操作类请求也走此轨道\n\n"
                 "**complex** — 涉及2个以上独立任务，或需要多Agent协作\n"
                 "  例：'查天气然后请假再取消会议室'\n\n"
                 "**clarify** — 以下情况必须返回 clarify：\n"
                 "  1. 输入过于模糊，无法判断是查询还是操作（如只输入'请假'）\n"
                 "  2. 输入有歧义，可能是查询也可能是操作\n"
-                "  3. 与IT/HR/工单完全无关（如'股票行情''电影推荐'）\n"
+                "  3. 与IT/HR/工单/企业服务完全无关（如'股票行情''电影推荐'）\n"
                 "  4. AI不确定答案时，宁可反问也不要猜测\n\n"
                 "## 输出JSON（严格按此格式，不要其他文字）\n"
                 '{{"track":"fast|action|complex|clarify","confidence":0.0-1.0,"reason":"简短理由","requires_tools":[]}}\n\n'
@@ -173,6 +175,8 @@ class Router:
         """
         语义路由决策（纯 LLM，无规则兜底）
 
+        v2: JSON 修复 + 最多 2 次重试
+
         Args:
             user_input: 用户输入文本
             agent_descriptions: 可用 Agent 描述
@@ -181,66 +185,93 @@ class Router:
         Returns:
             RouterDecision（始终返回，不会因解析失败而降级）
         """
-        try:
-            agent_list = agent_descriptions or (
-                "enterprise_rag(企业知识库问答: IT/HR/行政), "
-                "ticket_dispatch(工单派发: 创建/查询工单)"
-            )
+        agent_list = agent_descriptions or (
+            "enterprise_rag(企业知识库问答: IT/HR/行政), "
+            "ticket_dispatch(工单派发: 创建/查询多类型工单-IT故障/请假/报销/行政)"
+        )
 
-            chain = self.route_prompt | self.llm
-            response = await chain.ainvoke({
-                "agent_list": agent_list,
-                "conversation_history": conversation_history or "（首轮对话，无历史）",
-                "user_input": user_input,
-            })
+        last_error = None
+        last_content = ""
 
-            content = response.content.strip()
+        for attempt in range(2):
+            try:
+                chain = self.route_prompt | self.llm
+                response = await chain.ainvoke({
+                    "agent_list": agent_list,
+                    "conversation_history": conversation_history or "（首轮对话，无历史）",
+                    "user_input": user_input,
+                })
 
-            # 提取 JSON
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
+                content = response.content.strip()
+                last_content = content
 
-            data = json.loads(content)
+                # 提取 JSON
+                content = self._extract_json(content)
 
-            # 用 Pydantic 验证
-            decision = RouterDecision(
-                track=data.get("track", "clarify"),
-                confidence=float(data.get("confidence", 0.5)),
-                reason=data.get("reason", ""),
-                requires_tools=data.get("requires_tools", []),
-            )
+                data = json.loads(content)
 
-            # track 合法性检查
-            if decision.track not in ("fast", "action", "complex", "clarify"):
+                # 用 Pydantic 验证
                 decision = RouterDecision(
-                    track="clarify", confidence=0.3,
-                    reason=f"LLM返回未知轨道: {data.get('track')}",
+                    track=data.get("track", "clarify"),
+                    confidence=float(data.get("confidence", 0.5)),
+                    reason=data.get("reason", ""),
+                    requires_tools=data.get("requires_tools", []),
                 )
 
-            logger.info(
-                f"[Router] track={decision.track}, confidence={decision.confidence:.0%}, "
-                f"reason={decision.reason[:60]}"
-            )
-            return decision
+                # track 合法性检查
+                if decision.track not in ("fast", "action", "complex", "clarify"):
+                    decision = RouterDecision(
+                        track="clarify", confidence=0.3,
+                        reason=f"LLM返回未知轨道: {data.get('track')}",
+                    )
 
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            # LLM 输出的 JSON 无法解析 → 反问用户
-            logger.warning(f"[Router] JSON解析失败: {e}，返回 clarify")
-            return RouterDecision(
-                track="clarify",
-                confidence=0.0,
-                reason=f"LLM输出解析失败: {str(e)[:80]}",
-            )
+                logger.info(
+                    f"[Router] track={decision.track}, "
+                    f"confidence={decision.confidence:.0%}, "
+                    f"reason={decision.reason[:60]}"
+                )
+                return decision
 
-        except Exception as e:
-            logger.error(f"[Router] LLM调用失败: {e}")
-            return RouterDecision(
-                track="clarify",
-                confidence=0.0,
-                reason=f"路由服务异常: {str(e)[:80]}",
-            )
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                last_error = e
+                logger.warning(f"[Router] JSON解析失败 (attempt {attempt + 1}/2): {e}")
+
+                # 第一次失败：尝试 json_repair 修复
+                if attempt == 0:
+                    try:
+                        from json_repair import repair_json
+                        last_content = repair_json(last_content)
+                        logger.info("[Router] JSON 修复成功，重试解析")
+                    except ImportError:
+                        logger.info("[Router] json_repair 未安装，跳过修复")
+                    except Exception as repair_err:
+                        logger.warning(f"[Router] JSON 修复也失败: {repair_err}")
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"[Router] LLM调用异常 (attempt {attempt + 1}/2): {e}")
+
+        # 所有重试失败 → 反问用户
+        logger.warning(f"[Router] 全部重试失败: {last_error}，返回 clarify")
+        return RouterDecision(
+            track="clarify",
+            confidence=0.0,
+            reason=f"路由决策失败(2次重试): {str(last_error)[:80]}",
+        )
+
+    @staticmethod
+    def _extract_json(content: str) -> str:
+        """从 LLM 响应中提取 JSON 内容"""
+        if "```json" in content:
+            return content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            return content.split("```")[1].split("```")[0].strip()
+        # 尝试找到第一个 { 和最后一个 }
+        brace_start = content.find("{")
+        brace_end = content.rfind("}")
+        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+            return content[brace_start:brace_end + 1].strip()
+        return content
 
     # 向后兼容别名
     async def route(

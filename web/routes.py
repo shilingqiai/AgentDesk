@@ -58,6 +58,16 @@ async def knowledge_page(request: Request):
             "error": str(e),
         })
 
+
+@router.get("/tickets", response_class=HTMLResponse, summary="工单管理")
+async def tickets_page(request: Request):
+    return render_template("tickets.html", {"request": request})
+
+
+@router.get("/meeting-rooms", response_class=HTMLResponse, summary="会议室预定")
+async def meeting_rooms_page(request: Request):
+    return render_template("meeting_rooms.html", {"request": request})
+
 # ============================================================
 # 聊天API
 # ============================================================

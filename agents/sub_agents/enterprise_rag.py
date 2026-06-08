@@ -160,16 +160,7 @@ class EnterpriseRAGAgent(BaseSubAgent):
         conversation_history: str = "",
     ) -> str:
         """LLM 合成回答 — 基于跨领域检索到的文档"""
-        # 构建文档上下文（标注分类来源）
-        doc_context_parts = []
-        for i, doc in enumerate(docs):
-            category = doc.get("category", "通用")
-            content = doc.get("content", "")
-            score = doc.get("score", 0)
-            doc_context_parts.append(
-                f"[文档{i+1}] (分类:{category}, 相关度:{score:.2f})\n{content}"
-            )
-        doc_context = "\n\n".join(doc_context_parts)
+        doc_context = self._build_doc_context(docs)
 
         history_section = ""
         if conversation_history:
@@ -200,6 +191,64 @@ class EnterpriseRAGAgent(BaseSubAgent):
             # 兜底：直接返回检索到的文档内容
             top_doc = docs[0] if docs else {"content": "未找到相关信息"}
             return f"根据知识库检索结果：\n\n{top_doc.get('content', '')[:500]}"
+
+    def _build_doc_context(self, docs: list[dict]) -> str:
+        """构建文档上下文文本"""
+        doc_context_parts = []
+        for i, doc in enumerate(docs):
+            category = doc.get("category", "通用")
+            content = doc.get("content", "")
+            score = doc.get("score", 0)
+            doc_context_parts.append(
+                f"[文档{i+1}] (分类:{category}, 相关度:{score:.2f})\n{content}"
+            )
+        return "\n\n".join(doc_context_parts)
+
+    async def _synthesize_stream(
+        self,
+        user_input: str,
+        docs: list[dict],
+        conversation_history: str = "",
+    ):
+        """
+        流式 LLM 合成回答 — 使用 astream() 实现真流式
+
+        Yields:
+            每个 LLM token 字符串（用于逐字推送给前端）
+        """
+        doc_context = self._build_doc_context(docs)
+
+        history_section = ""
+        if conversation_history:
+            history_section = (
+                f"## 对话历史\n{conversation_history}\n\n"
+                f"注意：如果用户当前是追问，请结合历史上下文理解。\n\n"
+            )
+
+        prompt = (
+            f"你是一个企业员工服务台的AI助手。请根据以下知识库文档回答用户问题。\n\n"
+            f"{history_section}"
+            f"## 检索到的相关文档（共{len(docs)}篇，可能跨多个领域）\n"
+            f"{doc_context}\n\n"
+            f"## 用户问题\n{user_input}\n\n"
+            f"回答要求：\n"
+            f"1. 基于文档内容回答，不要编造\n"
+            f"2. 如果文档只部分覆盖了问题，诚实告知\n"
+            f"3. 如果涉及多个领域（如IT+HR），自然整合\n"
+            f"4. 简洁清晰，控制在300字以内\n"
+            f"5. 如有必要，引导用户到正确的操作渠道（OA、飞书、工单系统等）"
+        )
+
+        try:
+            async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            self.logger.error(f"LLM 流式合成失败: {e}")
+            # 兜底
+            top_doc = docs[0] if docs else {"content": "未找到相关信息"}
+            fallback = f"根据知识库检索结果：\n\n{top_doc.get('content', '')[:500]}"
+            yield fallback
 
     def _check_escalation_needed(self, response: str, docs: list[dict]) -> bool:
         """检查是否需要升级为工单"""

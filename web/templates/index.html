@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>企业智能服务台 — Copilot Studio 多Agent编排</title>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
     <style>
         :root {
             --bg-primary: #f5f6fa;
@@ -504,6 +505,74 @@
         .review-card p { font-size: 13px; margin-bottom: 12px; }
         .review-actions { display: flex; gap: 8px; }
 
+        /* Confirmation Card in Chat */
+        .confirm-card {
+            background: #f8f4ff;
+            border: 2px solid var(--accent);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin: 10px 0;
+            animation: slideUp 0.3s ease;
+        }
+        .confirm-card .card-title {
+            font-size: 16px; font-weight: 700; margin-bottom: 6px;
+            color: var(--accent);
+        }
+        .confirm-card .card-desc {
+            font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;
+        }
+        .confirm-card .card-field {
+            margin-bottom: 12px;
+        }
+        .confirm-card .card-field label {
+            display: block; font-size: 12px; font-weight: 600;
+            color: var(--text-secondary); margin-bottom: 4px;
+        }
+        .confirm-card .card-field input,
+        .confirm-card .card-field select {
+            width: 100%; padding: 10px 14px; border: 2px solid var(--border);
+            border-radius: var(--radius-sm); font-size: 14px; font-family: inherit;
+            outline: none; background: #fff; transition: border-color 0.2s;
+        }
+        .confirm-card .card-field input:focus,
+        .confirm-card .card-field select:focus {
+            border-color: var(--accent);
+        }
+        .confirm-card .card-actions {
+            display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end;
+        }
+        .confirm-card .card-actions .btn {
+            padding: 10px 20px; font-size: 14px;
+        }
+        .confirm-card .card-success {
+            text-align: center; padding: 16px; color: var(--success);
+        }
+        .confirm-card .card-success i { font-size: 32px; display: block; margin-bottom: 8px; }
+        .confirm-card .card-fallback {
+            text-align: center; margin-top: 12px; padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+        .confirm-card .card-fallback a {
+            color: var(--accent); text-decoration: none; font-size: 13px;
+        }
+        .confirm-card .card-fallback a:hover { text-decoration: underline; }
+        .confirm-card .card-alert {
+            padding: 10px 14px; border-radius: 6px; margin-bottom: 10px;
+            font-size: 13px; display: flex; align-items: flex-start; gap: 8px;
+        }
+        .confirm-card .card-alert.warning {
+            background: #fff3e0; border: 1px solid #ffc107; color: #856404;
+        }
+        .confirm-card .card-alert.info {
+            background: #e3f2fd; border: 1px solid #2196f3; color: #0d47a1;
+        }
+        .confirm-card .card-alert.success {
+            background: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20;
+        }
+        .confirm-card .card-field-hint {
+            font-size: 11px; color: var(--text-secondary); margin-top: 2px;
+        }
+
         /* Debug Panel */
         .debug-panel {
             position: fixed;
@@ -688,11 +757,17 @@
             </div>
         </div>
 
-        <!-- Quick Links — 仅保留有效页面 -->
+        <!-- Quick Links -->
         <div class="sidebar-section" style="margin-top: auto;">
-            <div class="sidebar-section-title">导航</div>
+            <div class="sidebar-section-title">功能导航</div>
+            <a href="/tickets" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
+                <i class="fas fa-clipboard-list"></i> 📋 工单管理
+            </a>
+            <a href="/meeting-rooms" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
+                <i class="fas fa-door-open"></i> 🏢 会议室预定
+            </a>
             <a href="/knowledge" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-database"></i> 知识库管理
+                <i class="fas fa-database"></i> 📚 知识库管理
             </a>
         </div>
     </aside>
@@ -1015,6 +1090,218 @@
     }
 
     // ============================================================
+    // Confirmation Card Rendering
+    // ============================================================
+
+    function renderConfirmCard(cardData) {
+        if (!cardData || !cardData.type) return null;
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'confirm-card';
+        wrapper.setAttribute('data-card', JSON.stringify(cardData));
+
+        // Title
+        const title = document.createElement('div');
+        title.className = 'card-title';
+        title.textContent = cardData.title || '确认信息';
+        wrapper.appendChild(title);
+
+        // Alerts (conflict warnings, suggestions)
+        if (cardData.alerts && cardData.alerts.length > 0) {
+            cardData.alerts.forEach(alert => {
+                const alertEl = document.createElement('div');
+                alertEl.className = 'card-alert ' + (alert.type || 'info');
+                alertEl.textContent = alert.message;
+                wrapper.appendChild(alertEl);
+            });
+        }
+
+        // Description (support newlines)
+        if (cardData.description) {
+            const desc = document.createElement('div');
+            desc.className = 'card-desc';
+            desc.innerHTML = cardData.description.replace(/\n/g, '<br>');
+            wrapper.appendChild(desc);
+        }
+
+        // Form fields
+        const fields = cardData.fields || [];
+        const formData = {};
+        fields.forEach(field => {
+            const fg = document.createElement('div');
+            fg.className = 'card-field';
+
+            const label = document.createElement('label');
+            label.textContent = (field.required ? '* ' : '') + (field.label || field.key);
+            fg.appendChild(label);
+
+            let input;
+            if (field.type === 'select' && field.options) {
+                input = document.createElement('select');
+                field.options.forEach(opt => {
+                    const o = document.createElement('option');
+                    o.value = opt.value;
+                    o.textContent = opt.label;
+                    if (opt.value === field.value) o.selected = true;
+                    input.appendChild(o);
+                });
+            } else if (field.type === 'date') {
+                input = document.createElement('input');
+                input.type = 'date';
+                input.value = field.value || '';
+            } else if (field.type === 'number') {
+                input = document.createElement('input');
+                input.type = 'number';
+                input.value = field.value || '';
+                input.min = field.min || 0;
+                if (field.max) input.max = field.max;
+            } else {
+                input = document.createElement('input');
+                input.type = 'text';
+                input.value = field.value || '';
+                if (field.placeholder) input.placeholder = field.placeholder;
+            }
+            input.setAttribute('data-field-key', field.key);
+            input.required = field.required || false;
+            fg.appendChild(input);
+
+            // Field hint
+            if (field.hint) {
+                const hint = document.createElement('div');
+                hint.className = 'card-field-hint';
+                hint.textContent = field.hint;
+                fg.appendChild(hint);
+            }
+
+            formData[field.key] = input;
+            wrapper.appendChild(fg);
+        });
+
+        // Action buttons
+        const actions = document.createElement('div');
+        actions.className = 'card-actions';
+
+        const dismissText = cardData.dismiss_text || '取消';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn';
+        cancelBtn.textContent = dismissText;
+        cancelBtn.onclick = () => {
+            wrapper.innerHTML = '<div class="card-fallback"><span style="color:var(--text-secondary);">' +
+                (dismissText === '问题已解决' ? '✅ 问题已解决，无需创建工单' : '已取消') +
+                '</span></div>';
+        };
+        actions.appendChild(cancelBtn);
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'btn primary';
+        confirmBtn.textContent = cardData.confirm_text || '确认';
+        confirmBtn.onclick = async () => {
+            // Collect form values
+            const values = {};
+            let valid = true;
+            fields.forEach(field => {
+                const el = formData[field.key];
+                const val = el.value.trim();
+                if (field.required && !val) {
+                    el.style.borderColor = 'var(--danger)';
+                    valid = false;
+                } else {
+                    el.style.borderColor = 'var(--border)';
+                }
+                values[field.key] = val;
+            });
+            if (!valid) return;
+
+            // Build request
+            let actionUrl = cardData.action || '';
+            for (const [k, v] of Object.entries(values)) {
+                actionUrl = actionUrl.replace(`{${k}}`, encodeURIComponent(v));
+            }
+
+            const method = cardData.method || 'POST';
+            let body;
+            if (cardData.body_template) {
+                body = { ...cardData.body_template };
+                for (const [k, v] of Object.entries(values)) {
+                    body[k] = v;
+                }
+            } else {
+                if (actionUrl.includes('/book')) {
+                    const [start, end] = (values.time_slot || '14:00-15:00').split('-');
+                    body = {
+                        date: values.date || new Date().toISOString().split('T')[0],
+                        start_time: start,
+                        end_time: end,
+                        title: values.title || '会议',
+                        booked_by: values.booked_by || 'web_user',
+                        description: values.description || '',
+                    };
+                } else {
+                    body = values;
+                }
+            }
+
+            // Show loading
+            confirmBtn.disabled = true;
+            confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 处理中...';
+            cancelBtn.disabled = true;
+
+            try {
+                const res = await fetch(actionUrl, {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const fallbackHtml = cardData.fallback_url ? `
+                        <div class="card-fallback">
+                            <a href="${cardData.fallback_url}">
+                                <i class="fas fa-arrow-right"></i> ${cardData.fallback_text || '查看详情'}
+                            </a>
+                        </div>` : '';
+                    wrapper.innerHTML = `
+                        <div class="card-success">
+                            <i class="fas fa-check-circle"></i>
+                            <p><strong>${cardData.success_message || '操作成功！'}</strong></p>
+                        </div>
+                        ${fallbackHtml}
+                    `;
+                } else {
+                    const err = await res.json();
+                    confirmBtn.disabled = false;
+                    cancelBtn.disabled = false;
+                    confirmBtn.textContent = cardData.confirm_text || '确认';
+                    confirmBtn.innerHTML = cardData.confirm_text || '确认';
+                    wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
+                        ❌ ${err.detail || '操作失败，请重试'}
+                    </div>`;
+                }
+            } catch (e) {
+                console.error('Card submit error:', e);
+                wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
+                    ❌ 请求失败：${e.message}
+                </div>`;
+            }
+        };
+        actions.appendChild(confirmBtn);
+        wrapper.appendChild(actions);
+
+        // Fallback link
+        if (cardData.fallback_url) {
+            const fallback = document.createElement('div');
+            fallback.className = 'card-fallback';
+            fallback.innerHTML = `<a href="${cardData.fallback_url}" target="_blank">
+                <i class="fas fa-external-link-alt"></i> ${cardData.fallback_text || '在新页面打开'}
+            </a>`;
+            wrapper.appendChild(fallback);
+        }
+
+        return wrapper;
+    }
+
+    // ============================================================
     // Streaming Chat — Hub & Spoke with real-time token streaming
     // ============================================================
 
@@ -1112,6 +1399,25 @@
                         setPipelineTrack('complex');
                         addOrchStep('plan', trimmed.replace('[COMPLEX]', '').trim());
                         addDebugEntry('event', 'complex_track', '进入复杂通道');
+
+                    } else if (trimmed.startsWith('[CARD]')) {
+                        // Confirmation card — render interactive form in chat
+                        const cardJson = trimmed.substring(6); // remove "[CARD]"
+                        try {
+                            const cardData = JSON.parse(cardJson);
+                            hideThinking();
+                            if (!botBubbleCreated) {
+                                addBotMessage();
+                                botBubbleCreated = true;
+                            }
+                            const cardEl = renderConfirmCard(cardData);
+                            if (cardEl && currentBotBubble) {
+                                currentBotBubble.appendChild(cardEl);
+                            }
+                            addDebugEntry('event', 'card', '确认卡片: ' + cardData.type);
+                        } catch (e) {
+                            console.error('Card parse error:', e);
+                        }
 
                     } else if (trimmed.startsWith('[FALLBACK]')) {
                         currentTrack = 'fallback';
