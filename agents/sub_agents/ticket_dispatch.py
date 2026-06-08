@@ -1448,6 +1448,14 @@ class TicketDispatchSubAgent(BaseSubAgent):
         card_desc = card.get("description", "")
         card_fields = card.get("fields", [])
 
+        # 根据卡片类型生成 new_topic 的正例
+        if ticket_type == "booking":
+            topic_examples = "'请假流程''年假几天''帮我查VPN''打印机怎么用'"
+        elif ticket_type in ("it_fault", "it_request"):
+            topic_examples = "'请假流程''预定会议室''报销单在哪''你是AI吗'"
+        else:
+            topic_examples = "'预定会议室''VPN怎么连''打印机坏了''你是AI吗'"
+
         prompt = (
             "你是企业服务台的意图分类器。用户看到了一张确认卡片，然后回复了一句话。\n"
             "请判断用户的意图。\n\n"
@@ -1460,9 +1468,11 @@ class TicketDispatchSubAgent(BaseSubAgent):
             "- confirm: 用户确认/同意卡片内容，要求执行操作。"
             "包括简短确认（'好的''行''ok'）和长句确认（'行吧那就帮我定了吧谢谢你'）\n"
             "- modify: 用户想修改卡片的某个参数（改时间、换房间、改金额、换主题等）\n"
-            "- cancel: 用户想取消/放弃/不要了（'算了''不定了''取消吧'）\n"
-            "- new_topic: 用户完全换了话题，问的是不相关的事"
-            "（'帮我查VPN''年假几天''你是AI吗'）\n\n"
+            "- cancel: 用户想取消/放弃/不要这张卡片（'算了''不定了''取消吧''不要了'）。"
+            "注意：cancel 是指放弃卡片操作，不是请假/离开的意思。\n"
+            "- new_topic: 用户完全换了话题，问的是和这张卡片不相关的事"
+            f"（{topic_examples}）。"
+            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。\n\n"
             "只输出一个单词："
         )
 
