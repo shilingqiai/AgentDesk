@@ -1,4 +1,5 @@
 # 企业员工AI服务台
+<img width="1909" height="920" alt="屏幕截图 2026-06-08 165206" src="https://github.com/user-attachments/assets/0584602b-605c-4004-9612-650786b834c5" />
 
 基于 LangGraph + FAISS 的多 Agent 智能服务台。Hub & Spoke 架构，语义路由，RAG 知识自服务，支持 Web 端流式对话、智能确认卡片、会议室管理、工单追踪与飞书机器人集成。
 
