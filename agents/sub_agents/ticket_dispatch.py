@@ -413,6 +413,181 @@ class TicketDispatchSubAgent(BaseSubAgent):
         return date_str, start_time, end_time, is_explicit_duration
 
     # ============================================================
+    # 请假日期范围解析
+    # ============================================================
+
+    @staticmethod
+    def _parse_date_range(
+        user_input: str, extra: dict = None,
+    ) -> dict:
+        """
+        从用户输入中解析请假日期范围。
+
+        支持：
+        - "下周2" / "下周二" → 下周那一天的日期
+        - "到下周二" / "到下周五" → 今天到下周五
+        - "下周一到周三" → 下周一到下周三
+        - "明天到后天" → 明天到后天
+        - "请假3天" / "3天" → 今天+2天
+        - "这周五" → 本周五
+
+        Returns:
+            {"start_date": "YYYY-MM-DD" or "", "end_date": "", "total_days": 0}
+        """
+        from datetime import datetime, timedelta
+        import re
+
+        result = {"start_date": "", "end_date": "", "total_days": 0}
+        # 使用 date() 避免 datetime 时间部分干扰天数计算
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        weekday_names = {
+            "周一": 0, "周二": 1, "周三": 2, "周四": 3,
+            "周五": 4, "周六": 5, "周日": 6,
+            "星期一": 0, "星期二": 1, "星期三": 2, "星期四": 3,
+            "星期五": 4, "星期六": 5, "星期日": 6,
+            "周1": 0, "周2": 1, "周3": 2, "周4": 3,
+            "周5": 4, "周6": 5, "周日": 6,  # 周日特殊
+        }
+
+        def _weekday_to_date(name: str, base: str = "this") -> str:
+            """将星期名称转为具体日期。base: 'this' | 'next'"""
+            if name in weekday_names:
+                target_wd = weekday_names[name]
+                current_wd = today.weekday()
+                days_ahead = target_wd - current_wd
+                if base == "next":
+                    days_ahead += 7
+                elif base == "this" and days_ahead <= 0:
+                    days_ahead += 7  # 这周的已过，推到下周
+                target = today + timedelta(days=days_ahead)
+                return target.strftime("%Y-%m-%d")
+            return ""
+
+        text = user_input
+
+        # 1. "下周一 到 下周三" 范围模式（下周X到下周Y）
+        range_pattern = r'(下?周[一二三四五六日1-6]|下?星期[一二三四五六日1-6]|明天|后天|今天)\s*[到至\-~]\s*(下?周[一二三四五六日1-6]|下?星期[一二三四五六日1-6]|明天|后天|今天)'
+        range_match = re.search(range_pattern, text)
+        if range_match:
+            left = range_match.group(1)
+            right = range_match.group(2)
+
+            def _parse_single(w: str, inherit_base: str = None) -> str:
+                if w in ("今天",):
+                    return today.strftime("%Y-%m-%d")
+                if w in ("明天",):
+                    return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+                if w in ("后天",):
+                    return (today + timedelta(days=2)).strftime("%Y-%m-%d")
+                base = "next" if w.startswith("下") else ("this" if w.startswith("这") else None)
+                # 如果当前词没有显式前缀，继承第一个词的前缀
+                if base is None and inherit_base:
+                    base = inherit_base
+                elif base is None:
+                    base = "this"
+                name = w.lstrip("下").lstrip("这")
+                if name.startswith("星期"):
+                    name = "周" + name[2:]
+                return _weekday_to_date(name, base)
+
+            left_base = "next" if left.startswith("下") else ("this" if left.startswith("这") else None)
+            start_d = _parse_single(left, left_base)
+            end_d = _parse_single(right, left_base)  # 右侧继承左侧前缀
+            if start_d and end_d:
+                result["start_date"] = start_d
+                result["end_date"] = end_d
+                sd = datetime.strptime(start_d, "%Y-%m-%d")
+                ed = datetime.strptime(end_d, "%Y-%m-%d")
+                result["total_days"] = (ed - sd).days + 1
+                return result
+
+        # 2. "到下周X" / "到下周一" 单端范围（今天到那天）
+        to_pattern = r'到\s*(下?周[一二三四五六日1-6]|下?星期[一二三四五六日1-6]|明天|后天)'
+        to_match = re.search(to_pattern, text)
+        if to_match:
+            w = to_match.group(1)
+            if w in ("明天",):
+                end_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+            elif w in ("后天",):
+                end_date = (today + timedelta(days=2)).strftime("%Y-%m-%d")
+            else:
+                base = "next" if w.startswith("下") else "this"
+                name = w.lstrip("下")
+                if name.startswith("星期"):
+                    name = "周" + name[2:]
+                end_date = _weekday_to_date(name, base)
+            if end_date:
+                result["start_date"] = today.strftime("%Y-%m-%d")
+                result["end_date"] = end_date
+                sd = today
+                ed = datetime.strptime(end_date, "%Y-%m-%d")
+                result["total_days"] = (ed - sd).days + 1
+                return result
+
+        # 3. 单独的 "下周X" / "下周一"（只有开始日期）
+        single_pattern = r'(下?周[一二三四五六日1-6]|下?星期[一二三四五六日1-6])'
+        single_match = re.search(single_pattern, text)
+        if single_match:
+            w = single_match.group(1)
+            base = "next" if w.startswith("下") else "this"
+            name = w.lstrip("下")
+            if name.startswith("星期"):
+                name = "周" + name[2:]
+            date_val = _weekday_to_date(name, base)
+            if date_val:
+                result["start_date"] = date_val
+                # 默认请假1天，但尝试从上下文推断天数
+                dur_match = re.search(r'(\d+|[一二两三四五])天', text)
+                if dur_match:
+                    cn = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5}
+                    try:
+                        days = int(dur_match.group(1))
+                    except ValueError:
+                        days = cn.get(dur_match.group(1), 1)
+                    result["total_days"] = days
+                    sd = datetime.strptime(date_val, "%Y-%m-%d")
+                    ed = sd + timedelta(days=days - 1)
+                    result["end_date"] = ed.strftime("%Y-%m-%d")
+                else:
+                    result["total_days"] = 1
+                    result["end_date"] = date_val
+                return result
+
+        # 4. "N天" 模式（没有明确日期时）
+        dur_match = re.search(r'(\d+|[一二两三四五六七八九十])\s*天', text)
+        if dur_match:
+            cn_num = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+                       "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+            try:
+                days = int(dur_match.group(1))
+            except ValueError:
+                days = cn_num.get(dur_match.group(1), 1)
+            # 起始日期优先用明天
+            start_d = today + timedelta(days=1)
+            result["start_date"] = start_d.strftime("%Y-%m-%d")
+            end_d = start_d + timedelta(days=days - 1)
+            result["end_date"] = end_d.strftime("%Y-%m-%d")
+            result["total_days"] = days
+            return result
+
+        # 5. "明天" / "后天"（无范围）
+        if "明天" in text:
+            d = today + timedelta(days=1)
+            result["start_date"] = d.strftime("%Y-%m-%d")
+            result["end_date"] = d.strftime("%Y-%m-%d")
+            result["total_days"] = 1
+            return result
+        if "后天" in text:
+            d = today + timedelta(days=2)
+            result["start_date"] = d.strftime("%Y-%m-%d")
+            result["end_date"] = d.strftime("%Y-%m-%d")
+            result["total_days"] = 1
+            return result
+
+        return result
+
+    # ============================================================
     # 用户偏好记忆
     # ============================================================
 
@@ -1003,25 +1178,73 @@ class TicketDispatchSubAgent(BaseSubAgent):
 
         elif ticket_type == "leave":
             extra = params.get("extra", {})
-            # 解析日期
-            parsed_date, _, _, _ = self._parse_time_expression(user_input, extra)
-            default_start = parsed_date if extra.get("start_date") or "明天" in user_input or "后天" in user_input else ""
+            from datetime import datetime as dt, timedelta
 
-            total_days = extra.get("total_days", 0)
-            default_end = ""
-            if default_start and total_days:
+            # 1. 从 LLM extra 字段提取
+            llm_start = extra.get("start_date", "")
+            llm_end = extra.get("end_date", "")
+            llm_days = extra.get("total_days", 0)
+            llm_leave_type = extra.get("leave_type", "")
+
+            # 2. 日期范围兜底：用 _parse_date_range 从用户原始输入解析
+            parsed_range = self._parse_date_range(user_input, extra)
+
+            default_start = llm_start or parsed_range.get("start_date", "")
+            default_end = llm_end or parsed_range.get("end_date", "")
+            total_days = llm_days or parsed_range.get("total_days", 0)
+
+            # 3. 如果还没有结束日期但有开始日期和天数，推算结束日期
+            if default_start and total_days and not default_end:
                 try:
-                    from datetime import datetime as dt, timedelta
                     sd = dt.strptime(default_start, "%Y-%m-%d")
                     ed = sd + timedelta(days=total_days - 1)
                     default_end = ed.strftime("%Y-%m-%d")
                 except Exception:
                     pass
 
+            # 4. 如果还没有天数但有开始和结束，计算天数
+            if default_start and default_end and not total_days:
+                try:
+                    sd = dt.strptime(default_start, "%Y-%m-%d")
+                    ed = dt.strptime(default_end, "%Y-%m-%d")
+                    total_days = (ed - sd).days + 1
+                except Exception:
+                    pass
+
+            # 5. 推断请假类型（LLM 优先 → 关键词兜底）
+            default_leave_type = llm_leave_type or "年假"
+            if not llm_leave_type:
+                type_keywords = [
+                    (["病假", "看病", "医院", "不舒服", "生病"], "病假"),
+                    (["事假", "有事", "私事", "办事"], "事假"),
+                    (["调休", "补休", "加班调休"], "调休"),
+                    (["婚假", "结婚", "婚礼"], "婚假"),
+                    (["产假", "陪产假", "生育"], "产假"),
+                    (["年假", "休假", "度假", "旅游"], "年假"),
+                ]
+                for kws, leave_type in type_keywords:
+                    if any(kw in user_input for kw in kws):
+                        default_leave_type = leave_type
+                        break
+
+            # 6. 生成描述
+            desc_parts = ["请确认以下请假信息，信息已根据您的输入预填："]
+            if default_start:
+                try:
+                    sd = dt.strptime(default_start, "%Y-%m-%d")
+                    wd = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][sd.weekday()]
+                    desc_parts.append(f"📅 {default_start} ({wd}) 起")
+                except Exception:
+                    desc_parts.append(f"📅 {default_start} 起")
+            if total_days:
+                desc_parts.append(f"共 {total_days} 天")
+            if default_leave_type:
+                desc_parts.append(f"类型：{default_leave_type}")
+
             return {
                 "type": "confirm",
                 "title": "🏖️ 请假申请",
-                "description": "请确认以下请假信息，信息已根据您的输入预填：",
+                "description": "\n".join(desc_parts),
                 "fields": [
                     {
                         "key": "leave_type", "label": "请假类型", "type": "select",
@@ -1032,7 +1255,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
                             {"value": "调休", "label": "调休"},
                             {"value": "婚假", "label": "婚假"},
                         ],
-                        "value": extra.get("leave_type", "年假"),
+                        "value": default_leave_type,
                         "required": True,
                     },
                     {
@@ -1214,7 +1437,22 @@ class TicketDispatchSubAgent(BaseSubAgent):
             for k, v in TICKET_TYPE_CONFIG.items()
         ])
 
+        from datetime import datetime as dt_now, timedelta
+        today_dt = dt_now.now()
+        today_str = today_dt.strftime("%Y-%m-%d")
+        weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        today_label = f"{today_str} ({weekday_cn[today_dt.weekday()]})"
+        tomorrow_str = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        day_after_str = (today_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+
         prompt = f"""你是一个企业工单系统的参数提取器。识别工单类型并提取信息。
+
+## 重要：今天的日期是 {today_label}
+请基于今天日期计算相对日期：
+- "下周2" → 下周周二 → 从今天算起，找到下周二的日期（YYYY-MM-DD）
+- "明天" → {tomorrow_str}
+- "后天" → {day_after_str}
+- "3天" / "请假3天" → 开始日期通常为当天或明天，结束日期 = 开始日期 + 天数-1
 
 {history_section}
 ## 工单类型
@@ -1226,6 +1464,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
 ## 默认值
 - 紧急度: {urgency}
 - 如用户未明确指定，priority 默认为 P2
+- leave 类型的 start_date/end_date 必须按今天日期推算，不能留空
 
 ## 输出 JSON（严格按此格式，不要其他文字）
 {{
@@ -1237,7 +1476,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
     "extra": {{
         "leave_type": "年假|病假|事假（仅 leave 类型）",
         "start_date": "开始日期（仅 leave 类型，YYYY-MM-DD）",
-        "end_date": "结束日期（仅 leave 类型）",
+        "end_date": "结束日期（仅 leave 类型，YYYY-MM-DD）",
         "total_days": 0,
         "expense_type": "差旅费|办公用品...（仅 expense 类型）",
         "amount": 0.0,
