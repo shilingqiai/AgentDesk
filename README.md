@@ -153,10 +153,18 @@ python app.py --mode web --port 8001
 
 ```bash
 pytest tests/ -v
-# 66 passed, 46 warnings
+# 70+ passed
 ```
+
+## 评估与监控
+
+| 工具 | 说明 |
+|------|------|
+| `python scripts/router_eval.py` | 路由评估（80条标注用例，混淆矩阵 + F1） |
+| `python scripts/router_eval.py --live` | 真实 LLM 评估（需 API Key） |
 
 ## 文档
 
-- [架构文档](research/README.md)
-- [评估与迭代记录](research/08-interview-evaluation.md)
+- [架构文档](scripts/README.md)
+- [路由评估报告](scripts/09-router-evaluation.md)
+- [路由失败案例分析](scripts/09-failure-analysis.md)

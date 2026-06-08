@@ -58,4 +58,6 @@ Thumbs.db
 
 # --- Jupyter ---
 .ipynb_checkpoints/
-research/
+
+# --- 个人文档（不提交） ---
+eval/

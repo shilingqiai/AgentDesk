@@ -556,8 +556,16 @@ class OrchestrationWorkflowRunner:
 
     @staticmethod
     def _create_checkpointer():
-        """MemorySaver：聊天记录仅内存保留，工单数据走 SQLite 持久化"""
-        logger.info("使用 MemorySaver（工单已通过 SQLite 持久化）")
+        """
+        MemorySaver：会话检查点内存存储。
+
+        生产环境可替换为持久化方案：
+          from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+          import aiosqlite
+          conn = await aiosqlite.connect("data/checkpoints.db")
+          return AsyncSqliteSaver(conn)
+        """
+        logger.info("使用 MemorySaver（生产可替换为 AsyncSqliteSaver 持久化）")
         return MemorySaver()
 
     @staticmethod

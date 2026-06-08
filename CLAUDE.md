@@ -66,8 +66,8 @@ pytest tests/ -v                        # 运行 66 个测试
 ### 文档（代码变更时同步更新）
 - `README.md` — 项目主文档
 - `CLAUDE.md` — 本文件
-- `research/README.md` — 架构文档
-- `research/08-interview-evaluation.md` — 评估记录
+- `scripts/README.md` — 架构文档
+- `scripts/08-interview-evaluation.md` — 评估记录
 
 ### IDE / 工具
 - `.gitignore` — 除非新增文件类型需要忽略
@@ -112,5 +112,5 @@ pytest tests/ -v                        # 运行 66 个测试
 ├── integrations/feishu/       # 飞书 Bot
 ├── tests/                     # 测试套件 (66 tests)
 ├── config/                    # 配置 ⚠️ 受保护
-└── research/                  # 架构文档
+└── scripts/                      # 评估与架构文档
 ```
