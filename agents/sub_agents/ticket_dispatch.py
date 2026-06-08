@@ -1288,10 +1288,45 @@ class TicketDispatchSubAgent(BaseSubAgent):
 
         elif ticket_type == "expense":
             extra = params.get("extra", {})
+            import re
+
+            # 1. 推断报销类型（LLM优先 → 关键词兜底）
+            default_expense_type = extra.get("expense_type", "")
+            if not default_expense_type:
+                type_keywords = [
+                    (["差旅", "出差", "住宿", "机票", "火车票", "酒店"], "差旅费"),
+                    (["办公", "文具", "打印", "耗材", "纸张"], "办公用品"),
+                    (["打车", "地铁", "公交", "出租车", "交通", "停车"], "交通费"),
+                    (["餐", "吃饭", "聚餐", "招待", "宴请", "外卖"], "餐费"),
+                    (["培训", "课程", "学习", "考试", "认证"], "培训费"),
+                ]
+                for kws, exp_type in type_keywords:
+                    if any(kw in user_input for kw in kws):
+                        default_expense_type = exp_type
+                        break
+            if not default_expense_type:
+                default_expense_type = "差旅费"
+
+            # 2. 推断金额（LLM优先 → 正则兜底）
+            default_amount = extra.get("amount", "")
+            if not default_amount:
+                amount_match = re.search(
+                    r'(\d+(?:\.\d{1,2})?)\s*(?:元|块|钱|￥|¥)', user_input
+                )
+                if amount_match:
+                    default_amount = amount_match.group(1)
+
+            # 3. 生成描述
+            desc_parts = ["请确认报销信息："]
+            if default_expense_type:
+                desc_parts.append(f"类型：{default_expense_type}")
+            if default_amount:
+                desc_parts.append(f"金额：{default_amount} 元")
+
             return {
                 "type": "confirm",
                 "title": "💰 报销申请",
-                "description": "请确认报销信息：",
+                "description": "\n".join(desc_parts),
                 "fields": [
                     {
                         "key": "expense_type", "label": "报销类型", "type": "select",
@@ -1302,12 +1337,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
                             {"value": "餐费", "label": "餐费"},
                             {"value": "培训费", "label": "培训费"},
                         ],
-                        "value": extra.get("expense_type", "差旅费"),
+                        "value": default_expense_type,
                         "required": True,
                     },
                     {
                         "key": "amount", "label": "金额（元）", "type": "number",
-                        "value": str(extra.get("amount", "")),
+                        "value": str(default_amount) if default_amount else "",
                         "min": 0, "required": True,
                     },
                     {
