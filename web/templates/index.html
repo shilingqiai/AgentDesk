@@ -1231,6 +1231,7 @@
                 for (const [k, v] of Object.entries(values)) {
                     body[k] = v;
                 }
+                body.skip_card = true;  // 卡片确认模式：直接创建工单
             } else {
                 if (actionUrl.includes('/book')) {
                     body = {

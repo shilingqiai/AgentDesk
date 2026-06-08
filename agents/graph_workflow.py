@@ -556,23 +556,9 @@ class OrchestrationWorkflowRunner:
 
     @staticmethod
     def _create_checkpointer():
-        """创建持久化检查点 — SqliteSaver 支持重启恢复"""
-        try:
-            from langgraph.checkpoint.sqlite import SqliteSaver
-            import os
-            db_dir = "data"
-            os.makedirs(db_dir, exist_ok=True)
-            checkpointer = SqliteSaver.from_conn_string(
-                f"sqlite:///{db_dir}/checkpoints.db"
-            )
-            logger.info("✓ 使用 SqliteSaver 持久化会话状态")
-            return checkpointer
-        except ImportError:
-            logger.warning("SqliteSaver 不可用，降级为 MemorySaver（不持久化）")
-            return MemorySaver()
-        except Exception as e:
-            logger.warning(f"SqliteSaver 初始化失败: {e}，降级为 MemorySaver")
-            return MemorySaver()
+        """MemorySaver：聊天记录仅内存保留，工单数据走 SQLite 持久化"""
+        logger.info("使用 MemorySaver（工单已通过 SQLite 持久化）")
+        return MemorySaver()
 
     @staticmethod
     def _ensure_agents_loaded():

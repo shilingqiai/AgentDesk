@@ -7,7 +7,7 @@ Router 路由决策测试
 - 未知轨道兜底
 - LLM 异常降级
 
-v3: Function Calling — with_structured_output(RouterDecision)
+v3.1: prompt→JSON（DashScope 兼容，不用 with_structured_output）
 """
 
 import pytest
@@ -19,10 +19,12 @@ from agents.orchestrator.router import Router, RouterDecision, RouteResult
 # 辅助
 # ============================================================
 
-def make_mock_llm(decision: RouterDecision):
-    """创建返回指定 RouterDecision 的 mock 结构化 LLM"""
-    mock = AsyncMock()
-    mock.ainvoke = AsyncMock(return_value=decision)
+def make_mock_llm(json_str: str):
+    """创建返回指定 JSON 字符串的 mock LLM"""
+    mock = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = json_str
+    mock.ainvoke = AsyncMock(return_value=mock_response)
     return mock
 
 
@@ -31,15 +33,13 @@ def make_mock_llm(decision: RouterDecision):
 # ============================================================
 
 class TestRouterDecision:
-    """Router 结构化决策测试 (v3 Function Calling)"""
+    """Router 结构化决策测试 (v3.1 prompt→JSON)"""
 
     @pytest.mark.asyncio
     async def test_fast_track(self):
         """fast 轨道：知识查询类问题"""
-        decision = RouterDecision(
-            track="fast", confidence=0.95, reason="用户询问VPN排查方法"
-        )
-        mock_llm = make_mock_llm(decision)
+        json_str = '{"track":"fast","confidence":0.95,"reason":"用户询问VPN排查方法","requires_tools":[]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
@@ -58,10 +58,8 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_action_track_leave(self):
         """action 轨道：请假申请"""
-        decision = RouterDecision(
-            track="action", confidence=0.90, reason="用户申请请假"
-        )
-        mock_llm = make_mock_llm(decision)
+        json_str = '{"track":"action","confidence":0.90,"reason":"用户申请请假","requires_tools":[]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
@@ -79,11 +77,8 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_action_track_it(self):
         """action 轨道：IT 故障工单"""
-        decision = RouterDecision(
-            track="action", confidence=0.88, reason="用户提交IT故障工单",
-            requires_tools=["jira_api"],
-        )
-        mock_llm = make_mock_llm(decision)
+        json_str = '{"track":"action","confidence":0.88,"reason":"用户提交IT故障工单","requires_tools":["jira_api"]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
@@ -101,10 +96,8 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_clarify_track(self):
         """clarify 轨道：输入模糊"""
-        decision = RouterDecision(
-            track="clarify", confidence=0.20, reason="输入过于模糊无法判断意图"
-        )
-        mock_llm = make_mock_llm(decision)
+        json_str = '{"track":"clarify","confidence":0.20,"reason":"输入过于模糊无法判断意图","requires_tools":[]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
@@ -122,10 +115,8 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_complex_track(self):
         """complex 轨道：多步骤复合指令"""
-        decision = RouterDecision(
-            track="complex", confidence=0.75, reason="多步骤复合指令"
-        )
-        mock_llm = make_mock_llm(decision)
+        json_str = '{"track":"complex","confidence":0.75,"reason":"多步骤复合指令","requires_tools":[]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
@@ -140,17 +131,15 @@ class TestRouterDecision:
         assert result.track == "complex"
 
     @pytest.mark.asyncio
-    async def test_llm_returns_dict_fallback(self):
-        """LLM 返回 dict 而非 RouterDecision → 手动构造"""
-        mock = AsyncMock()
-        mock.ainvoke = AsyncMock(return_value={
-            "track": "fast", "confidence": 0.85, "reason": "查询VPN"
-        })
+    async def test_json_in_markdown_block(self):
+        """LLM 返回 markdown 包裹的 JSON → _extract_json 提取"""
+        json_str = '```json\n{"track":"fast","confidence":0.85,"reason":"查询VPN","requires_tools":[]}\n```'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
             router = Router()
-            router.llm = mock
+            router.llm = mock_llm
 
             result = await router.decide("VPN怎么连")
 
@@ -160,19 +149,13 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_invalid_track_fallback(self):
         """LLM 返回未知轨道 → 强制 clarify"""
-        decision = RouterDecision(
-            track="fast", confidence=0.8, reason="test"
-        )
-        # 绕过 Pydantic validation 设置未知 track
-        mock = AsyncMock()
-        mock.ainvoke = AsyncMock(return_value={
-            "track": "unknown_track", "confidence": 0.8, "reason": "test"
-        })
+        json_str = '{"track":"unknown_track","confidence":0.8,"reason":"test","requires_tools":[]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
             router = Router()
-            router.llm = mock
+            router.llm = mock_llm
 
             result = await router.decide("测试")
 
@@ -181,10 +164,8 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_route_backward_compat(self):
         """向后兼容的 route() 方法返回 RouteResult"""
-        decision = RouterDecision(
-            track="fast", confidence=0.95, reason="VPN排查"
-        )
-        mock_llm = make_mock_llm(decision)
+        json_str = '{"track":"fast","confidence":0.95,"reason":"VPN排查","requires_tools":[]}'
+        mock_llm = make_mock_llm(json_str)
 
         with patch("agents.orchestrator.router.create_chat_model",
                    return_value=MagicMock()):
@@ -201,7 +182,7 @@ class TestRouterDecision:
     @pytest.mark.asyncio
     async def test_llm_call_failure(self):
         """LLM 调用异常 → 返回 clarify"""
-        mock = AsyncMock()
+        mock = MagicMock()
         mock.ainvoke = AsyncMock(side_effect=Exception("API timeout"))
 
         with patch("agents.orchestrator.router.create_chat_model",

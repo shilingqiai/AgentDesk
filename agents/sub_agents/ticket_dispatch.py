@@ -154,13 +154,6 @@ class TicketDispatchSubAgent(BaseSubAgent):
     def __init__(self):
         super().__init__()
         self.llm = create_chat_model(temperature=0.1)
-        # v3: 结构化输出 LLM — 原生 Function Calling，无需 JSON 解析
-        self.extract_llm = create_chat_model(temperature=0).with_structured_output(
-            TicketParams
-        )
-        self.intent_llm = create_chat_model(
-            model_type="router", temperature=0
-        ).with_structured_output(CardIntent)
         self._db_router = None
 
     @property
@@ -1502,14 +1495,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
         conversation_history: str = "",
     ) -> dict:
         """
-        使用 LLM Function Calling 从用户输入中提取工单参数。
-
-        v3 改进：
-        - 使用 with_structured_output(TicketParams) 替代 prompt→JSON 解析
-        - 无需 _extract_json()、json_repair、重试逻辑
-        - 模型原生保证结构化输出，可靠性 100%
+        使用 LLM prompt→JSON 从用户输入中提取工单参数。
+        DashScope 兼容：不用 with_structured_output，直接解析 JSON。
         """
         from datetime import datetime as dt_now, timedelta
+        import json as _json, re as _re
+
         today_dt = dt_now.now()
         today_str = today_dt.strftime("%Y-%m-%d")
         weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -1524,10 +1515,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
 
         history_section = ""
         if conversation_history:
-            history_section = (
-                f"## 对话历史\n{conversation_history}\n\n"
-                f"结合上下文理解用户意图。\n\n"
-            )
+            history_section = f"## 对话历史\n{conversation_history}\n\n"
 
         system_prompt = (
             "你是一个企业工单系统的参数提取器。识别工单类型并提取信息。\n"
@@ -1545,34 +1533,66 @@ class TicketDispatchSubAgent(BaseSubAgent):
             "P3: 咨询、非紧急问题"
         )
 
-        try:
-            result: TicketParams = await self.extract_llm.ainvoke([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": (
-                    f"## 工单类型\n{ticket_type_options}\n\n"
-                    f"{history_section}"
-                    f"## 用户输入\n{user_input}\n\n"
-                    f"提取工单参数。"
-                )},
-            ])
+        user_prompt = (
+            f"## 工单类型\n{ticket_type_options}\n\n"
+            f"{history_section}"
+            f"## 用户输入\n{user_input}\n\n"
+            f"请返回 JSON（不要 markdown 包裹）：\n"
+            f'{{"ticket_type":"leave|it_fault|expense|admin",'
+            f'"title":"简短标题","description":"描述","category":"分类",'
+            f'"priority":"P0|P1|P2|P3","extra":{{"leave_type":"年假|病假|...",'
+            f'"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD","total_days":0}}}}'
+        )
 
-            # 验证 ticket_type
-            ticket_type = result.ticket_type
+        try:
+            response = await self.llm.ainvoke([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ])
+            data = self._parse_json(response.content)
+
+            ticket_type = data.get("ticket_type", "it_fault")
             if ticket_type not in TICKET_TYPE_CONFIG:
                 ticket_type = "it_fault"
 
             return {
                 "ticket_type": ticket_type,
-                "title": result.title,
-                "description": result.description,
-                "category": result.category,
-                "priority": result.priority,
-                "extra": result.extra.model_dump(),
+                "title": data.get("title", user_input[:30]),
+                "description": data.get("description", user_input),
+                "category": data.get("category", "其他"),
+                "priority": data.get("priority", "P2"),
+                "extra": data.get("extra", {}),
             }
 
         except Exception as e:
-            self.logger.warning(f"Function Calling 参数提取失败: {e}，使用规则兜底")
+            self.logger.warning(f"参数提取失败: {e}，使用规则兜底")
             return self._fallback_extract(user_input, urgency)
+
+    @staticmethod
+    def _parse_json(text: str) -> dict:
+        """从 LLM 文本中提取 JSON（DashScope 兼容）"""
+        import json as _json, re as _re
+        # 1. 直接解析
+        try:
+            return _json.loads(text.strip())
+        except _json.JSONDecodeError:
+            pass
+        # 2. 提取 ```json ... ``` 块
+        m = _re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+        if m:
+            try:
+                return _json.loads(m.group(1).strip())
+            except _json.JSONDecodeError:
+                pass
+        # 3. 提取第一个 { ... } 对
+        m = _re.search(r'\{[\s\S]*\}', text)
+        if m:
+            raw = m.group(0)
+            try:
+                return _json.loads(raw)
+            except _json.JSONDecodeError:
+                pass
+        raise ValueError(f"无法提取 JSON: {text[:200]}")
 
     def _fallback_extract(self, user_input: str, urgency: str) -> dict:
         """规则兜底：基于关键词快速推断 ticket_type"""
@@ -1735,11 +1755,13 @@ class TicketDispatchSubAgent(BaseSubAgent):
             "注意：cancel 是指放弃卡片操作，不是请假/离开的意思。\n"
             "- new_topic: 用户完全换了话题，问的是和这张卡片不相关的事"
             f"（{topic_examples}）。\n"
-            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。"
+            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。\n\n"
+            "严格输出以下 JSON 格式（不要 markdown 包裹，不要其他文字）：\n"
+            '{"intent":"confirm|modify|cancel|new_topic","reason":"一句话理由"}'
         )
 
         try:
-            result: CardIntent = await self.intent_llm.ainvoke([
+            response = await self.llm.ainvoke([
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (
                     f"卡片类型：{ticket_type}\n"
@@ -1750,17 +1772,38 @@ class TicketDispatchSubAgent(BaseSubAgent):
                     f"请分类用户的意图。"
                 )},
             ])
-
-            intent = result.intent
-            logger.info(
-                f"[classify_card_response] → {intent} (reason: {result.reason[:60]})"
+            data = self._parse_json(response.content)
+            intent = data.get("intent", "confirm")
+            if intent not in ("confirm", "modify", "cancel", "new_topic"):
+                intent = "confirm"
+            self.logger.info(
+                f"[classify_card_response] → {intent} (reason: {data.get('reason', '')[:60]})"
             )
             return intent
 
         except Exception as e:
-            logger.warning(f"[classify_card_response] 结构化输出失败: {e}，fallback")
-            fallback = "confirm" if len(user_text) <= 10 else "new_topic"
-            return fallback
+            self.logger.warning(f"[classify_card_response] 分类失败: {e}，fallback")
+            # 关键词兜底：判断用户输入是否与卡片相关
+            card_title = card.get("title", "")
+            card_desc = card.get("description", "")
+            card_text = card_title + card_desc
+            # 确认/修改/取消类关键词
+            confirm_kw = ["确认", "好的", "行", "可以", "是", "对", "ok", "yes", "提交", "预定"]
+            cancel_kw = ["算了", "不要", "取消", "不了", "不用"]
+            modify_kw = ["改", "换", "调整", "修改", "换成", "改成"]
+            # 先检查是否明确取消/修改
+            if any(kw in user_text for kw in cancel_kw):
+                return "cancel"
+            if any(kw in user_text for kw in modify_kw):
+                return "modify"
+            # 检查是否与卡片主题相关
+            card_keywords = set(card_text.replace(" ", ""))
+            user_keywords = set(user_text.replace(" ", ""))
+            overlap = card_keywords & user_keywords
+            if len(overlap) >= 2 or any(kw in user_text for kw in confirm_kw):
+                return "confirm"
+            # 完全无关 → new_topic
+            return "new_topic"
 
     async def execute_card(self, card: dict, user_text: str) -> str:
         """

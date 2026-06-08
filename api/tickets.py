@@ -21,10 +21,17 @@ router = APIRouter(prefix="/api/tickets", tags=["工单管理"])
 
 class TicketCreateRequest(BaseModel):
     """创建工单请求"""
+    model_config = {"extra": "allow"}
+
     user_input: str = Field(..., description="用户输入文本")
-    ticket_type: Optional[str] = Field(default=None, description="手动指定类型 it_fault/leave/expense/admin")
+    ticket_type: Optional[str] = Field(default=None, description="手动指定类型")
     priority: Optional[str] = Field(default="P2", description="优先级 P0/P1/P2/P3")
     user_id: Optional[str] = Field(default="", description="申请人ID")
+    skip_card: Optional[bool] = Field(default=False, description="卡片确认时跳过卡片逻辑直接创建")
+    title: Optional[str] = Field(default=None)
+    description: Optional[str] = Field(default=None)
+    category: Optional[str] = Field(default=None)
+    payload: Optional[dict] = Field(default=None)
 
 
 class TicketStatusUpdate(BaseModel):
@@ -101,17 +108,52 @@ async def get_ticket(ticket_id: int):
 
 @router.post("/", summary="创建工单")
 async def create_ticket(request: TicketCreateRequest):
-    """
-    创建工单 — 自动通过 LLM 提取参数
-
-    如果未指定 ticket_type，由 TicketDispatchSubAgent 自动识别。
-    """
+    """创建工单 — 卡片确认时 skip_card=True 直接写库"""
     try:
-        from agents.sub_agents.ticket_dispatch import TicketDispatchSubAgent
+        # 卡片确认模式：直接创建工单，不走 LLM 卡片循环
+        if request.skip_card and request.ticket_type:
+            from datetime import datetime as dt
+            db = DatabaseRouter()
 
-        agent = TicketDispatchSubAgent()
+            payload = (request.payload or {}).copy()
+            extra_fields = request.model_extra or {}
+            for k, v in extra_fields.items():
+                if v is not None and v != "" and k not in payload:
+                    payload[k] = v
+
+            type_category = {
+                "it_fault": "IT故障", "leave": "请假",
+                "expense": "报销", "admin": "行政服务",
+            }.get(request.ticket_type, "其他")
+
+            ticket = db.ticket.add_ticket(
+                ticket_type=request.ticket_type,
+                title=request.title or request.user_input[:30],
+                description=request.description or request.user_input,
+                category=request.category or type_category,
+                priority=request.priority or "P2",
+                requester_id=request.user_id or "",
+                trace_id=f"card_{dt.utcnow().strftime('%Y%m%d%H%M%S')}",
+                payload=payload,
+            )
+
+            return {
+                "status": "success",
+                "data": {
+                    "ticket_id": ticket["id"],
+                    "ticket_number": ticket["ticket_number"],
+                    "ticket_type": ticket["ticket_type"],
+                    "status": ticket["status"],
+                    "priority": ticket["priority"],
+                    "response": f"工单 {ticket['ticket_number']} 已创建成功！",
+                },
+            }
+
+        # LLM 模式
+        from agents.sub_agents.ticket_dispatch import TicketDispatchSubAgent
         from agents.a2a.protocol import AgentMessage
 
+        agent = TicketDispatchSubAgent()
         message = AgentMessage.create_delegation(
             from_agent="api",
             to_agent="ticket_dispatch",
@@ -122,10 +164,9 @@ async def create_ticket(request: TicketCreateRequest):
                 "user_id": request.user_id or "",
             },
         )
-
         result = await agent.execute(message)
 
-        if result.success:
+        if result.success and not result.payload.get("return_card"):
             return {
                 "status": "success",
                 "data": {
@@ -136,6 +177,11 @@ async def create_ticket(request: TicketCreateRequest):
                     "priority": result.payload.get("priority"),
                     "response": result.payload.get("direct_response"),
                 },
+            }
+        elif result.success and result.payload.get("return_card"):
+            return {
+                "status": "success",
+                "data": {"card": result.payload.get("card")},
             }
         else:
             raise HTTPException(status_code=500, detail=result.error or "工单创建失败")

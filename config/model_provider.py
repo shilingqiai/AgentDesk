@@ -42,7 +42,7 @@ def create_chat_model(model_type: str = "main", temperature: float = 0):
         temperature: 温度参数（0=确定性, 1=创造性）
     """
     if model_type == "router":
-        model = os.getenv("ROUTER_MODEL", "qwen-mt-flash")
+        model = os.getenv("ROUTER_MODEL", "qwen-max")
     else:
         model = os.getenv("LLM_MODEL", "qwen-max")
 
