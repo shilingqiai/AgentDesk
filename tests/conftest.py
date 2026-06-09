@@ -22,14 +22,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ============================================================
 
 class MockLLMResponse:
-    """模拟 LLM 返回对象"""
-    def __init__(self, content: str):
+    """模拟 LLM 返回对象（v3.2 bind_tools 兼容）"""
+    def __init__(self, content: str, tool_calls: list = None):
         self.content = content
+        # tool_calls=None → 模拟 bind_tools 返回值（空列表=未调用 tool）
+        self.tool_calls = tool_calls if tool_calls is not None else []
+
+    def __repr__(self):
+        tc = f", tool_calls={self.tool_calls}" if self.tool_calls else ""
+        return f"MockLLMResponse(content={self.content[:50]!r}{tc})"
 
 
 def create_mock_llm(responses: list[str] = None):
     """
-    创建模拟 LLM，按顺序返回预设响应
+    创建模拟 LLM，按顺序返回预设响应。
+    返回的 mock 对象模拟 bind_tools 行为：tool_calls=[]，触发 prompt→JSON fallback。
 
     Args:
         responses: 每次调用的返回内容列表
@@ -40,10 +47,25 @@ def create_mock_llm(responses: list[str] = None):
     mock = AsyncMock()
     if responses:
         mock.ainvoke = AsyncMock(side_effect=[
-            MockLLMResponse(r) for r in responses
+            MockLLMResponse(r, tool_calls=[]) for r in responses
         ])
     else:
-        mock.ainvoke = AsyncMock(return_value=MockLLMResponse("{}"))
+        mock.ainvoke = AsyncMock(return_value=MockLLMResponse("{}", tool_calls=[]))
+    return mock
+
+
+def create_mock_llm_with_tool_calls(tool_args: dict):
+    """
+    创建模拟 bind_tools LLM，返回 tool_calls 响应。
+
+    Args:
+        tool_args: tool_calls[0]["args"] 的内容
+    """
+    mock = AsyncMock()
+    mock_response = MockLLMResponse("", tool_calls=[
+        {"name": "extract_ticket_params", "args": tool_args}
+    ])
+    mock.ainvoke = AsyncMock(return_value=mock_response)
     return mock
 
 

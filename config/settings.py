@@ -21,7 +21,7 @@ class AppSettings(BaseSettings):
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         alias="LLM_BASE_URL"
     )
-    router_model: str = Field(default="qwen-mt-flash", alias="ROUTER_MODEL")
+    router_model: str = Field(default="qwen-max", alias="ROUTER_MODEL")
 
     # Embedding 模型
     embedding_model: str = Field(default="text-embedding-v4", alias="EMBEDDING_MODEL")

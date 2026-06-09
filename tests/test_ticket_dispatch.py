@@ -24,7 +24,8 @@ class TestTicketDispatch:
         from tests.conftest import create_mock_llm, TICKET_PARAMS_IT_RESPONSE
 
         agent = TicketDispatchSubAgent()
-        agent.llm = create_mock_llm([TICKET_PARAMS_IT_RESPONSE])
+        # v3.2: _extract_params 使用 llm_extract（bind_tools 版本）
+        agent.llm_extract = create_mock_llm([TICKET_PARAMS_IT_RESPONSE])
 
         # Mock DB Router
         mock_db = MagicMock()
@@ -55,7 +56,7 @@ class TestTicketDispatch:
         from tests.conftest import create_mock_llm, TICKET_PARAMS_LEAVE_RESPONSE
 
         agent = TicketDispatchSubAgent()
-        agent.llm = create_mock_llm([TICKET_PARAMS_LEAVE_RESPONSE])
+        agent.llm_extract = create_mock_llm([TICKET_PARAMS_LEAVE_RESPONSE])
 
         mock_db = MagicMock()
         agent._db_router = mock_db
@@ -85,7 +86,7 @@ class TestTicketDispatch:
         from tests.conftest import create_mock_llm, TICKET_PARAMS_EXPENSE_RESPONSE
 
         agent = TicketDispatchSubAgent()
-        agent.llm = create_mock_llm([TICKET_PARAMS_EXPENSE_RESPONSE])
+        agent.llm_extract = create_mock_llm([TICKET_PARAMS_EXPENSE_RESPONSE])
 
         mock_db = MagicMock()
         agent._db_router = mock_db
@@ -108,16 +109,15 @@ class TestTicketDispatch:
 
     @pytest.mark.asyncio
     async def test_extract_params_json_repair(self):
-        """JSON 格式有问题 → json_repair 修复"""
+        """JSON 格式有问题 → json_repair 修复（prompt→JSON fallback）"""
         from agents.sub_agents.ticket_dispatch import TicketDispatchSubAgent
         from tests.conftest import create_mock_llm
 
         agent = TicketDispatchSubAgent()
 
-        # 第一次返回有问题的 JSON（尾逗号），第二次正常
+        # 返回有问题的 JSON（尾逗号）→ 触发 json_repair 修复
         bad_json = '{"ticket_type":"it_fault","title":"测试","description":"test","category":"其他","priority":"P2","extra":{},}'  # noqa: E501
-        good_json = '{"ticket_type":"it_fault","title":"测试","description":"test","category":"其他","priority":"P2","extra":{}}'  # noqa: E501
-        agent.llm = create_mock_llm([bad_json, good_json])
+        agent.llm_extract = create_mock_llm([bad_json])
 
         params = await agent._extract_params("网络故障")
         assert params["ticket_type"] == "it_fault"

@@ -1,5 +1,5 @@
 """
-工单派发子Agent — 处理多类型工单创建与派发请求
+工单派发子Agent — 处理多类型工单创建与派发请求（v3.2 bind_tools 版）
 
 负责：
 - 识别工单类型（IT故障/请假/报销/行政服务）
@@ -12,6 +12,10 @@
     leave     — 请假申请（年假/病假/事假）
     expense   — 报销申请（差旅/办公/餐费）
     admin     — 行政服务（会议室/快递/资产领用）
+
+DashScope 兼容：_extract_params / classify_card_response 优先使用
+bind_tools + tool_choice="auto" 触发原生 Function Calling，
+prompt→JSON 作为 fallback。
 
 YOU ARE A SUB-AGENT. DO NOT REPLY TO USER DIRECTLY.
 MUST return structured findings to the Orchestrator.
@@ -37,7 +41,7 @@ logger = logging.getLogger("agent.ticket_dispatch")
 
 
 # ============================================================
-# Pydantic 结构化输出 Schema（v3 Function Calling）
+# Pydantic 结构化输出 Schema（v3.2 bind_tools 版）
 # ============================================================
 
 class TicketExtra(BaseModel):
@@ -56,7 +60,7 @@ class TicketExtra(BaseModel):
 
 
 class TicketParams(BaseModel):
-    """工单参数提取的结构化输出（Function Calling）"""
+    """工单参数提取的结构化输出"""
     ticket_type: Literal["it_fault", "leave", "expense", "admin"] = Field(
         description="工单类型"
     )
@@ -70,11 +74,130 @@ class TicketParams(BaseModel):
 
 
 class CardIntent(BaseModel):
-    """卡片回复意图分类（Function Calling）"""
+    """卡片回复意图分类"""
     intent: Literal["confirm", "modify", "cancel", "new_topic"] = Field(
         description="用户意图：confirm=确认执行, modify=修改参数, cancel=取消放弃, new_topic=换话题"
     )
     reason: str = Field(default="", description="分类理由，一句话")
+
+
+# ============================================================
+# OpenAI Function Calling 工具定义
+# ============================================================
+
+TICKET_PARAMS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "extract_ticket_params",
+        "description": "从用户输入中提取工单参数：类型、标题、描述、分类、优先级及扩展字段",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticket_type": {
+                    "type": "string",
+                    "enum": ["it_fault", "leave", "expense", "admin"],
+                    "description": "工单类型",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "工单标题，简洁明了，不超过20字",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "工单详细描述",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "具体分类，从可用分类中选",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["P0", "P1", "P2", "P3"],
+                    "description": "优先级。P0=系统宕机/核心业务中断，P1=影响效率但可绕过，P2=一般故障/申请，P3=咨询/非紧急",
+                },
+                "extra": {
+                    "type": "object",
+                    "description": "扩展字段，根据工单类型填写对应子字段",
+                    "properties": {
+                        "leave_type": {
+                            "type": "string",
+                            "description": "请假类型：年假|病假|事假|调休|婚假|产假（仅 leave）",
+                        },
+                        "start_date": {
+                            "type": "string",
+                            "description": "开始日期 YYYY-MM-DD（仅 leave）",
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "结束日期 YYYY-MM-DD（仅 leave）",
+                        },
+                        "total_days": {
+                            "type": "integer",
+                            "description": "请假天数（仅 leave）",
+                        },
+                        "expense_type": {
+                            "type": "string",
+                            "description": "报销类型（仅 expense）",
+                        },
+                        "amount": {
+                            "type": "number",
+                            "description": "报销金额（仅 expense）",
+                        },
+                        "has_invoice": {
+                            "type": "boolean",
+                            "description": "是否有发票（仅 expense）",
+                        },
+                        "service_type": {
+                            "type": "string",
+                            "description": "服务类型：会议室|快递|资产|访客（仅 admin）",
+                        },
+                        "time_slot": {
+                            "type": "string",
+                            "description": "时间段如 14:00-16:00（仅 admin）",
+                        },
+                        "suggested_engineer_skill": {
+                            "type": "string",
+                            "description": "建议工程师技能（仅 it_fault）",
+                        },
+                        "affected_users": {
+                            "type": "integer",
+                            "description": "受影响用户数（仅 it_fault）",
+                        },
+                    },
+                },
+            },
+            "required": ["ticket_type", "title", "description", "category"],
+        },
+    },
+}
+
+CARD_INTENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "classify_intent",
+        "description": "分类用户对确认卡片的回复意图",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": ["confirm", "modify", "cancel", "new_topic"],
+                    "description": (
+                        "confirm=确认/同意卡片内容要求执行；"
+                        "modify=想修改卡片参数（改时间/换房间/改金额）；"
+                        "cancel=想取消/放弃/不要这张卡片；"
+                        "new_topic=完全换了话题，问的是和卡片不相关的事"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "分类理由，一句话",
+                },
+            },
+            "required": ["intent", "reason"],
+        },
+    },
+}
 
 
 # ============================================================
@@ -153,7 +276,15 @@ class TicketDispatchSubAgent(BaseSubAgent):
 
     def __init__(self):
         super().__init__()
-        self.llm = create_chat_model(temperature=0.1)
+        base_llm = create_chat_model(temperature=0.1)
+        self.llm = base_llm
+        # bind_tools 版本 — 触发原生 Function Calling
+        self.llm_extract = base_llm.bind_tools(
+            [TICKET_PARAMS_TOOL], tool_choice="auto"
+        )
+        self.llm_classify = base_llm.bind_tools(
+            [CARD_INTENT_TOOL], tool_choice="auto"
+        )
         self._db_router = None
 
     @property
@@ -1495,11 +1626,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
         conversation_history: str = "",
     ) -> dict:
         """
-        使用 LLM prompt→JSON 从用户输入中提取工单参数。
-        DashScope 兼容：不用 with_structured_output，直接解析 JSON。
+        使用 LLM Function Calling 从用户输入中提取工单参数。
+
+        v3.2: bind_tools + tool_choice="auto" 优先，
+        模型未调用 tool 时自动降级为 prompt→JSON。
         """
         from datetime import datetime as dt_now, timedelta
-        import json as _json, re as _re
 
         today_dt = dt_now.now()
         today_str = today_dt.strftime("%Y-%m-%d")
@@ -1518,7 +1650,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
             history_section = f"## 对话历史\n{conversation_history}\n\n"
 
         system_prompt = (
-            "你是一个企业工单系统的参数提取器。识别工单类型并提取信息。\n"
+            "你是一个企业工单系统的参数提取器。调用 extract_ticket_params 函数提取工单信息。\n"
             f"今天的日期是 {today_label}。\n"
             f"明天={tomorrow_str}，后天={day_after_str}。\n"
             "- '下周2' → 下周周二 → 从今天算起找到下周二的日期（YYYY-MM-DD）\n"
@@ -1537,19 +1669,37 @@ class TicketDispatchSubAgent(BaseSubAgent):
             f"## 工单类型\n{ticket_type_options}\n\n"
             f"{history_section}"
             f"## 用户输入\n{user_input}\n\n"
-            f"请返回 JSON（不要 markdown 包裹）：\n"
-            f'{{"ticket_type":"leave|it_fault|expense|admin",'
-            f'"title":"简短标题","description":"描述","category":"分类",'
-            f'"priority":"P0|P1|P2|P3","extra":{{"leave_type":"年假|病假|...",'
-            f'"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD","total_days":0}}}}'
+            f"请调用 extract_ticket_params 函数提取工单参数。"
         )
 
         try:
-            response = await self.llm.ainvoke([
+            # ── 主路径：Function Calling ──
+            response = await self.llm_extract.ainvoke([
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ])
-            data = self._parse_json(response.content)
+
+            data = None
+            if response.tool_calls:
+                tool_call = response.tool_calls[0]
+                args = tool_call.get("args", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+                data = args
+                self.logger.info(
+                    f"[_extract_params:FC] ticket_type={data.get('ticket_type')}, "
+                    f"title={data.get('title', '')[:30]}"
+                )
+            else:
+                # ── Fallback: prompt→JSON ──
+                self.logger.info("[_extract_params] 模型未调用 tool，降级为 prompt→JSON")
+                try:
+                    data = self._parse_json(response.content)
+                except ValueError:
+                    raise
+
+            if data is None:
+                raise ValueError("无法获取提取结果")
 
             ticket_type = data.get("ticket_type", "it_fault")
             if ticket_type not in TICKET_TYPE_CONFIG:
@@ -1727,9 +1877,11 @@ class TicketDispatchSubAgent(BaseSubAgent):
         self, user_text: str, card: dict, ticket_type: str,
     ) -> str:
         """
-        用 Function Calling 分类用户对卡片的回复意图。
+        分类用户对卡片的回复意图。
 
-        v3: with_structured_output(CardIntent) → 原生结构化输出，无字符串匹配
+        v3.2: bind_tools + tool_choice="auto" 优先，
+        模型未调用 tool 时自动降级为 prompt→JSON。
+        最终 fallback: 关键词规则。
 
         Returns: "confirm" | "modify" | "cancel" | "new_topic"
         """
@@ -1746,7 +1898,7 @@ class TicketDispatchSubAgent(BaseSubAgent):
 
         system_prompt = (
             "你是企业服务台的意图分类器。用户看到了一张确认卡片，然后回复了一句话。\n"
-            "请判断用户的意图。\n\n"
+            "请调用 classify_intent 函数判断用户的意图。\n\n"
             "分类标准：\n"
             "- confirm: 用户确认/同意卡片内容，要求执行操作。"
             "包括简短确认（'好的''行''ok'）和长句确认（'行吧那就帮我定了吧谢谢你'）\n"
@@ -1755,13 +1907,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
             "注意：cancel 是指放弃卡片操作，不是请假/离开的意思。\n"
             "- new_topic: 用户完全换了话题，问的是和这张卡片不相关的事"
             f"（{topic_examples}）。\n"
-            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。\n\n"
-            "严格输出以下 JSON 格式（不要 markdown 包裹，不要其他文字）：\n"
-            '{"intent":"confirm|modify|cancel|new_topic","reason":"一句话理由"}'
+            "核心判断：用户的话是否仍然围绕这张卡片？围绕卡片=confirm/modify/cancel，完全不相关=new_topic。"
         )
 
         try:
-            response = await self.llm.ainvoke([
+            # ── 主路径：Function Calling ──
+            response = await self.llm_classify.ainvoke([
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (
                     f"卡片类型：{ticket_type}\n"
@@ -1769,40 +1920,54 @@ class TicketDispatchSubAgent(BaseSubAgent):
                     f"卡片描述：{card_desc[:300]}\n"
                     f"卡片字段：{json.dumps([f.get('label','') for f in card_fields], ensure_ascii=False)}\n\n"
                     f"用户回复：\"{user_text}\"\n\n"
-                    f"请分类用户的意图。"
+                    f"请调用 classify_intent 函数分类用户的意图。"
                 )},
             ])
-            data = self._parse_json(response.content)
-            intent = data.get("intent", "confirm")
-            if intent not in ("confirm", "modify", "cancel", "new_topic"):
-                intent = "confirm"
-            self.logger.info(
-                f"[classify_card_response] → {intent} (reason: {data.get('reason', '')[:60]})"
-            )
-            return intent
+
+            data = None
+            if response.tool_calls:
+                tool_call = response.tool_calls[0]
+                args = tool_call.get("args", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+                data = args
+            else:
+                # ── Fallback: prompt→JSON ──
+                try:
+                    data = self._parse_json(response.content)
+                except ValueError:
+                    data = None
+
+            if data:
+                intent = data.get("intent", "confirm")
+                if intent not in ("confirm", "modify", "cancel", "new_topic"):
+                    intent = "confirm"
+                self.logger.info(
+                    f"[classify_card_response] → {intent} "
+                    f"(reason: {data.get('reason', '')[:60]})"
+                )
+                return intent
+            else:
+                raise ValueError("无法获取分类结果")
 
         except Exception as e:
-            self.logger.warning(f"[classify_card_response] 分类失败: {e}，fallback")
-            # 关键词兜底：判断用户输入是否与卡片相关
+            self.logger.warning(f"[classify_card_response] 分类失败: {e}，关键词兜底")
+            # ── 最终 fallback: 关键词规则 ──
             card_title = card.get("title", "")
-            card_desc = card.get("description", "")
-            card_text = card_title + card_desc
-            # 确认/修改/取消类关键词
+            card_desc_text = card.get("description", "")
+            card_text = card_title + card_desc_text
             confirm_kw = ["确认", "好的", "行", "可以", "是", "对", "ok", "yes", "提交", "预定"]
             cancel_kw = ["算了", "不要", "取消", "不了", "不用"]
             modify_kw = ["改", "换", "调整", "修改", "换成", "改成"]
-            # 先检查是否明确取消/修改
             if any(kw in user_text for kw in cancel_kw):
                 return "cancel"
             if any(kw in user_text for kw in modify_kw):
                 return "modify"
-            # 检查是否与卡片主题相关
             card_keywords = set(card_text.replace(" ", ""))
             user_keywords = set(user_text.replace(" ", ""))
             overlap = card_keywords & user_keywords
             if len(overlap) >= 2 or any(kw in user_text for kw in confirm_kw):
                 return "confirm"
-            # 完全无关 → new_topic
             return "new_topic"
 
     async def execute_card(self, card: dict, user_text: str) -> str:
