@@ -1,16 +1,26 @@
 """
-Copilot Studio 多Agent编排工作流 — Hub & Spoke 三级路由 (v3)
+Copilot Studio 多Agent编排工作流 — Hub & Spoke 三级路由 (v4)
 
 架构：
-    route → fast_track → END      (80% 知识查询 → EnterpriseRAGAgent)
-          → action_track → END    (15% 工单派发 → TicketDispatchSubAgent)
-          → complex_track → END   (5%  复合指令 → TaskPlanner)
-          → clarification → END   (AI不确定 → 反问用户)
+    phase=initial:
+        route → fast_track → END      (80% 知识查询 → EnterpriseRAGAgent)
+              → action_track → END    (15% 工单派发 → TicketDispatchSubAgent)
+              → complex_track → END   (5%  复合指令 → TaskPlanner)
+              → clarification → END   (AI不确定 → 反问用户)
 
-v3 改进：
-    - 废除"伪 Agent"：it_consultant / hr_consultant / facilities 合并为 EnterpriseRAGAgent
-    - 废除关键词硬匹配：Router 纯语义路由，不确定时返回 clarify 反问用户
-    - fast_track 不再按 agent_id 分发，统一委派 EnterpriseRAGAgent (FAISS 跨领域检索)
+    phase=self_help_provided:
+        route → re_evaluate → {
+            escalation → action_track → END (升级为工单)
+            follow_up  → fast_track(带上下文) → END (追问细节)
+            new_topic  → route (清状态重路由)
+            confirm    → END (清状态结束)
+        }
+
+v4 改进：
+    - 对话阶段追踪：initial / self_help_provided，防止 RAG 死循环
+    - re_evaluate_node: LLM 语义判断用户对上一轮方案的态度（升级/追问/换话题/确认）
+    - RAG 去重：follow_up 时注入 last_rag_topic 上下文，不重复相同方案
+    - 状态清理：new_topic / confirm / escalation 出口自动清 self-help 上下文
 
 流式输出：
     [THINKING] → 前端显示"思考中..."
@@ -53,8 +63,12 @@ class TicketState(TypedDict):
     final_response: str
     resolved: bool
     thread_id: str
-    pending_card_type: str   # "" = 无锁, "admin"/"it_fault"/"leave"/"expense" = 卡片锁定中
-    re_route: bool           # True = action_track 处理完回 Router 重路由
+    pending_card_type: str    # "" = 无锁, "admin"/"leave"/"expense"/"it_fault" = 卡片锁定中
+    re_route: bool            # True = action_track 处理完回 Router 重路由
+    # v4: 对话阶段追踪
+    conversation_phase: str   # "initial" | "self_help_provided"
+    last_rag_topic: str       # 上一轮 RAG 回答的主题（如 "VPN故障排查"）
+    last_rag_summary: str     # 上一轮 RAG 回答的核心内容（100字摘要）
 
 
 def create_initial_state(user_input: str, thread_id: str = "default") -> TicketState:
@@ -65,6 +79,7 @@ def create_initial_state(user_input: str, thread_id: str = "default") -> TicketS
         needs_human_review=False, human_decision=None,
         final_response="", resolved=False, thread_id=thread_id,
         pending_card_type="", re_route=False,
+        conversation_phase="initial", last_rag_topic="", last_rag_summary="",
     )
 
 
@@ -90,16 +105,37 @@ def _get_user_text(state: TicketState) -> str:
     return state["messages"][-1].content
 
 
+def _reset_self_help_state(state: TicketState) -> None:
+    """清空 self-help 追踪状态（防幽灵上下文）"""
+    state["conversation_phase"] = "initial"
+    state["last_rag_topic"] = ""
+    state["last_rag_summary"] = ""
+
+
+def _generate_rag_topic(user_input: str, response: str) -> str:
+    """从用户输入和 RAG 回答中提取简要主题（规则兜底，不调 LLM）"""
+    # 取用户输入的前 20 字作为主题标签
+    topic = user_input[:20].replace("\n", " ").strip()
+    return topic if topic else "企业服务咨询"
+
+
 # ============================================================
 # 工作流节点
 # ============================================================
 
 async def route_node(state: TicketState) -> TicketState:
-    """语义路由 — LLM 判定轨道，低置信度 → clarify。卡片锁期间短路。"""
+    """
+    语义路由 — LLM 判定轨道，低置信度 → clarify。
+
+    短路规则（按优先级）：
+    1. 卡片锁 pending_card → action_track
+    2. self_help_provided 阶段 → re_evaluate_node（不调 Router）
+    3. 正常 Router 判定
+    """
     from agents.orchestrator.router import Router
     from agents.orchestrator.agent_registry import agent_registry
 
-    # 卡片锁：pending_card 存在 → 短路 Router，所有输入直送 action_track
+    # ── 短路 1: 卡片锁 ──
     pending = state.get("pending_card_type", "")
     if pending:
         logger.info(f"[Route] 卡片锁 pending_card={pending}，短路 Router → action")
@@ -110,6 +146,17 @@ async def route_node(state: TicketState) -> TicketState:
         state["resolved"] = False
         return state
 
+    # ── 短路 2: self_help_provided 阶段 → re_evaluate ──
+    if state.get("conversation_phase") == "self_help_provided":
+        logger.info(
+            f"[Route] phase=self_help_provided, topic={state.get('last_rag_topic')}, "
+            f"短路 Router → re_evaluate"
+        )
+        state["track"] = "re_evaluate"
+        state["resolved"] = False
+        return state
+
+    # ── 正常 Router 判定 ──
     router = Router()
     user_text = _get_user_text(state)
     agent_descriptions = agent_registry.get_routing_descriptions()
@@ -150,19 +197,137 @@ async def route_node(state: TicketState) -> TicketState:
     return state
 
 
+async def re_evaluate_node(state: TicketState) -> TicketState:
+    """
+    重新评估节点 (v4)：self_help_provided 阶段，用户回复后判断意图。
+
+    用 LLM 语义理解用户对上一轮方案的反馈：
+      - escalation → 方案无效，需要工单/人工（强制 action_track）
+      - follow_up → 追问细节，仍走 RAG（带 last_rag_topic 防重复）
+      - new_topic → 换话题（清状态，回 route_node 重路由）
+      - confirm → 问题解决（清状态，结束）
+    """
+    from config.model_provider import create_chat_model
+    import json as _json
+
+    user_text = _get_user_text(state)
+    topic = state.get("last_rag_topic", "企业服务")
+    summary = state.get("last_rag_summary", "")[:150]
+
+    system_prompt = (
+        "你是对话意图分类器。上一轮助手针对「{topic}」提供了方案，用户刚回复了一句话。\n"
+        "请判断用户意图（返回 JSON）：\n\n"
+        "**escalation** — 方案无效，需升级为工单/人工\n"
+        "  - 直接否定：'还是不行''没用''试了但没解决''按照做了但没用'\n"
+        "  - 间接否定：'这些我都知道''检查过了都正常''版本已经最新'\n"
+        "  - 沮丧表达：'搞不定''放弃了''帮我找人'\n"
+        "  - 嫌弃方案：'太麻烦了，有别的办法吗'（若知识库可能无替代方案→escalation）\n\n"
+        "**follow_up** — 围绕同一问题追问，未否定方案\n"
+        "  - 要细节：'第二步怎么操作''客户端在哪下载'\n"
+        "  - 扩展询问：'还有其他排查方法吗''有没有简单点的办法'\n"
+        "  关键：不表达'方案无效'，只是要更多信息\n\n"
+        "**new_topic** — 完全切换话题，不涉及对上一轮方案的评价\n"
+        "  - '帮我查请假政策''食堂怎么走''报销流程'\n"
+        "  - '算了先不管了，帮我查报销' ← 主动放弃当前问题\n\n"
+        "**confirm** — 问题已解决\n"
+        "  - '好了''可以了''解决了谢谢''原来是我密码错了'\n\n"
+        "注意：一旦判定 new_topic 或 confirm，说明当前上下文已结束，JSON 中不要引用旧方案。"
+    ).replace("{topic}", topic)
+
+    try:
+        llm = create_chat_model(model_type="main", temperature=0)
+        response = await llm.ainvoke([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": (
+                f"上一轮方案摘要：{summary}\n\n"
+                f"用户回复：\"{user_text}\"\n\n"
+                f"返回 JSON：{{\"intent\":\"escalation|follow_up|new_topic|confirm\",\"reason\":\"...\"}}"
+            )},
+        ])
+
+        # 解析
+        text = response.content.strip()
+        try:
+            data = _json.loads(text)
+        except _json.JSONDecodeError:
+            import re
+            m = re.search(r'\{[\s\S]*\}', text)
+            data = _json.loads(m.group(0)) if m else {}
+
+        intent = data.get("intent", "escalation")
+        reason = data.get("reason", "")
+
+        if intent not in ("escalation", "follow_up", "new_topic", "confirm"):
+            intent = "escalation"  # 兜底：不确定时升级
+
+        logger.info(
+            f"[ReEvaluate] intent={intent} reason={reason[:60]} "
+            f"input={user_text[:50]}"
+        )
+
+        state["agent_results"]["re_evaluate"] = {
+            "intent": intent, "reason": reason,
+        }
+
+        if intent == "escalation":
+            # 强制走 action_track 创建工单
+            state["track"] = "action"
+            state["agent_id"] = "ticket_dispatch"
+            state["intent"] = "ticket_request"
+            state["urgency"] = "high"
+            state["confidence"] = 0.9
+            state["resolved"] = False
+            # 不清 state — action_track 执行成功后清
+
+        elif intent == "follow_up":
+            # 仍走 fast_track，但带上下文防重复
+            state["track"] = "fast"
+            state["agent_id"] = "enterprise_rag"
+            state["intent"] = "knowledge_query"
+            state["confidence"] = 0.85
+            state["resolved"] = False
+            # follow_up 时不清 state — fast_track 需要 last_rag_topic
+
+        elif intent == "new_topic":
+            # 清状态，走 route 重路由
+            _reset_self_help_state(state)
+            state["track"] = ""
+            state["agent_id"] = ""
+            state["resolved"] = False
+            state["re_route"] = True
+
+        elif intent == "confirm":
+            # 清状态，直接结束
+            _reset_self_help_state(state)
+            state["final_response"] = "很高兴能帮到您！还有其他问题随时问我。"
+            state["resolved"] = True
+
+    except Exception as e:
+        logger.error(f"[ReEvaluate] LLM 调用失败: {e}，兜底为 escalation")
+        state["track"] = "action"
+        state["agent_id"] = "ticket_dispatch"
+        state["intent"] = "ticket_request"
+        state["urgency"] = "high"
+        state["confidence"] = 0.7
+        state["resolved"] = False
+
+    return state
+
+
 async def fast_track_node(state: TicketState) -> TicketState:
     """
-    极速通道 (80%)：统一委派 EnterpriseRAGAgent
+    极速通道 (80%)：EnterpriseRAG — 真流式 token 输出 + 状态持久化
 
-    FAISS 向量检索自动跨领域匹配（IT+HR+行政），
-    不再按 agent_id 分发到不同的伪 Agent。
+    v4 流式：通过 LangGraph StreamWriter 发射每个 token，
+    run_stream 端以 stream_mode=["values","custom"] 接收并转为 [STREAM] 标签。
     """
     from agents.orchestrator.agent_registry import agent_registry
-    from agents.a2a.protocol import AgentMessage as AM
     from agents.a2a.message_bus import message_bus
+    from langgraph.config import get_stream_writer
 
     user_text = _get_user_text(state)
     conversation_history = _build_conversation_context(state["messages"])
+    phase = state.get("conversation_phase", "initial")
 
     agent_instance = agent_registry.get_agent("enterprise_rag")
     if agent_instance is None:
@@ -171,43 +336,60 @@ async def fast_track_node(state: TicketState) -> TicketState:
         state["resolved"] = True
         return state
 
-    delegation = AM.create_delegation(
-        from_agent="orchestrator", to_agent="enterprise_rag",
-        payload={
-            "user_input": user_text,
-            "task": "企业知识库问答",
-            "intent_category": "fast",
-            "conversation_history": conversation_history,
-            "urgency": state.get("urgency", "low"),
-        },
-        trace_id=state.get("thread_id", ""),
-    )
-
     try:
-        result = await agent_instance.execute(delegation)
-        message_bus.record(result)
-        state["agent_results"]["enterprise_rag"] = {
-            "success": result.success,
-            "payload": result.payload,
-            "error": result.error,
-        }
+        await agent_instance._ensure_initialized()
 
-        if result.success and result.payload.get("direct_response"):
-            state["final_response"] = result.payload["direct_response"]
-        elif result.error:
-            state["final_response"] = (
-                f"咨询处理异常：{result.error}\n\n请稍后重试或联系人工服务。"
+        # 检索
+        docs = await agent_instance.knowledge_service.search(user_text, top_k=5)
+
+        writer = get_stream_writer()
+        full_response = ""
+
+        if not docs:
+            full_response = (
+                "抱歉，我在知识库中没有找到相关的信息。\n\n"
+                "建议提交工单让工程师协助处理。"
             )
+            writer(full_response)
         else:
-            state["final_response"] = "处理完成，如有疑问请联系人工服务。"
-    except Exception as e:
-        logger.error(f"[FastTrack] EnterpriseRAGAgent 执行失败: {e}")
-        state["final_response"] = "抱歉，处理您的请求时出现了问题。请稍后重试。"
+            # v4 follow_up 上下文注入
+            if phase == "self_help_provided":
+                topic = state.get("last_rag_topic", "")
+                conversation_history = (
+                    f"用户对上一轮「{topic}」方案提出了追问。\n{conversation_history}"
+                )
 
-    state["resolved"] = True
-    source_count = len(result.payload.get("sources", [])) if result.success else 0
-    logger.info(f"[FastTrack] EnterpriseRAG 检索 {source_count} 篇，"
-                f"响应 {len(state['final_response'])} 字")
+            # 真流式 token 发射
+            async for token in agent_instance._synthesize_stream(
+                user_text, docs, conversation_history,
+            ):
+                full_response += token
+                writer(token)
+
+        # 流式完成后设置状态
+        state["final_response"] = full_response.strip()
+        source_list = [{"category": d.get("category", ""), "score": d.get("score", 0)}
+                       for d in docs] if docs else []
+        state["agent_results"]["enterprise_rag"] = {
+            "success": True,
+            "payload": {"direct_response": full_response.strip(), "sources": source_list},
+            "error": None,
+        }
+        state["conversation_phase"] = "self_help_provided"
+        state["last_rag_topic"] = _generate_rag_topic(user_text, full_response)
+        state["last_rag_summary"] = full_response[:150]
+        state["resolved"] = True
+        logger.info(
+            f"[FastTrack] phase → self_help_provided, "
+            f"topic={state['last_rag_topic']}, "
+            f"tokens={len(full_response)}"
+        )
+
+    except Exception as e:
+        logger.error(f"[FastTrack] 执行失败: {e}")
+        state["final_response"] = "抱歉，处理您的请求时出现了问题。请稍后重试。"
+        state["resolved"] = True
+
     return state
 
 
@@ -287,18 +469,34 @@ async def action_track_node(state: TicketState) -> TicketState:
         elif intent == "new_topic":
             state["pending_card_type"] = ""
             state["re_route"] = True
+            # 清 self-help 状态 — 用户主动放弃当前话题
+            _reset_self_help_state(state)
             # 不设 final_response — 后续重路由的节点会填
 
         state["resolved"] = True
         return state
 
     # ================================================================
-    # 非锁模式（现有逻辑）：创建新工单 / 返回新卡片
+    # 非锁模式：创建新工单 / 返回新卡片 / escalation 升级
     # ================================================================
+
+    # v4: 如果是 escalation 路径（re_evaluate → action），生成升级上下文
+    escalation_context = ""
+    if state.get("conversation_phase") == "self_help_provided":
+        topic = state.get("last_rag_topic", "")
+        summary = state.get("last_rag_summary", "")[:100]
+        escalation_context = (
+            f"用户之前咨询「{topic}」，排障方案未能解决问题，现升级为工单。"
+            f"上一轮方案摘要：{summary}"
+        )
+
     delegation = AM.create_delegation(
         from_agent="orchestrator", to_agent="ticket_dispatch",
         payload={
-            "user_input": user_text,
+            "user_input": (
+                f"{escalation_context}\n用户原始输入：{user_text}"
+                if escalation_context else user_text
+            ),
             "task": "提取参数并创建工单",
             "intent_category": "action",
             "urgency": state.get("urgency", "medium"),
@@ -330,8 +528,12 @@ async def action_track_node(state: TicketState) -> TicketState:
             # 设置卡片锁：下一轮文本输入将短路 Router
             state["pending_card_type"] = ticket_type
             logger.info(f"[ActionTrack] 设置卡片锁 pending_card_type={ticket_type}")
+            # 清 self-help 状态 — 升级已完成
+            _reset_self_help_state(state)
         elif result.success and result.payload.get("direct_response"):
             state["final_response"] = result.payload["direct_response"]
+            # 清 self-help 状态 — 工单已创建
+            _reset_self_help_state(state)
         elif result.error:
             state["final_response"] = (
                 f"操作未能完成：{result.error}\n\n"
@@ -339,6 +541,7 @@ async def action_track_node(state: TicketState) -> TicketState:
             )
         else:
             state["final_response"] = "操作已完成，如需查看详情请稍后查询。"
+            _reset_self_help_state(state)
     except Exception as e:
         logger.error(f"[ActionTrack] 执行失败: {e}")
         state["final_response"] = "抱歉，执行操作时出现了问题。请稍后重试或联系服务台。"
@@ -433,11 +636,22 @@ async def clarification_node(state: TicketState) -> TicketState:
     - Router 返回 track="clarify"
     - Router 返回 confidence < 0.7（route_node 强制转为 clarify）
     - LLM JSON 解析失败
+
+    v4: self_help_provided 阶段的反问带上下文，不再问通用的"查还是办"。
     """
     user_text = _get_user_text(state)
     confidence = state.get("confidence", 0)
+    topic = state.get("last_rag_topic", "")
 
-    if confidence < 0.3:
+    # v4: 有上下文时反问更精准
+    if topic and state.get("conversation_phase") == "self_help_provided":
+        state["final_response"] = (
+            f"关于「{topic}」的方案似乎没有解决您的问题。您是想要：\n\n"
+            f"1. 我再提供其他思路？\n"
+            f"2. 直接提交工单让工程师处理？\n\n"
+            f"请告诉我您的想法。"
+        )
+    elif confidence < 0.3:
         # 完全无法理解 → 通用引导
         state["final_response"] = (
             "抱歉，我不太确定您想做什么。\n\n"
@@ -484,17 +698,40 @@ async def respond_node(state: TicketState) -> TicketState:
 # ============================================================
 
 def route_after_route(state: TicketState) -> Literal[
-    "fast_track", "action_track", "complex_track", "clarification",
+    "re_evaluate", "fast_track", "action_track", "complex_track", "clarification",
 ]:
+    """路由分发 — v4 增加 re_evaluate 分支"""
     track = state.get("track", "clarification")
-    if track == "fast":       return "fast_track"
-    elif track == "action":   return "action_track"
-    elif track == "complex":  return "complex_track"
-    else:                     return "clarification"
+    if track == "re_evaluate": return "re_evaluate"
+    if track == "fast":        return "fast_track"
+    elif track == "action":    return "action_track"
+    elif track == "complex":   return "complex_track"
+    else:                      return "clarification"
+
+
+def after_re_evaluate(state: TicketState) -> Literal[
+    "action_track", "fast_track", "route", "respond",
+]:
+    """
+    re_evaluate 后的分发 (v4):
+      - escalation → action_track
+      - follow_up → fast_track（带上下文）
+      - new_topic → route（清状态重路由）
+      - confirm → respond（清状态结束）
+    """
+    intent = state.get("agent_results", {}).get("re_evaluate", {}).get("intent", "escalation")
+    if intent == "escalation":
+        return "action_track"
+    elif intent == "follow_up":
+        return "fast_track"
+    elif intent == "new_topic":
+        return "route"
+    else:  # confirm
+        return "respond"
 
 
 def after_action_track(state: TicketState) -> Literal["route", "respond"]:
-    """卡片锁 new_topic 时重路由，其他情况正常结束"""
+    """卡片锁 / new_topic 时重路由，其他情况正常结束"""
     if state.get("re_route"):
         logger.info("[Graph] action_track → route (re_route)")
         return "route"
@@ -509,6 +746,7 @@ def build_orchestration_workflow() -> StateGraph:
     workflow = StateGraph(TicketState)
 
     workflow.add_node("route", route_node)
+    workflow.add_node("re_evaluate", re_evaluate_node)
     workflow.add_node("fast_track", fast_track_node)
     workflow.add_node("action_track", action_track_node)
     workflow.add_node("complex_track", complex_track_node)
@@ -517,11 +755,21 @@ def build_orchestration_workflow() -> StateGraph:
 
     workflow.set_entry_point("route")
 
+    # route → 五路分发
     workflow.add_conditional_edges("route", route_after_route, {
+        "re_evaluate": "re_evaluate",
         "fast_track": "fast_track",
         "action_track": "action_track",
         "complex_track": "complex_track",
         "clarification": "clarification",
+    })
+
+    # re_evaluate → 四路分发
+    workflow.add_conditional_edges("re_evaluate", after_re_evaluate, {
+        "action_track": "action_track",
+        "fast_track": "fast_track",
+        "route": "route",
+        "respond": "respond",
     })
 
     workflow.add_edge("fast_track", "respond")
@@ -535,6 +783,52 @@ def build_orchestration_workflow() -> StateGraph:
     workflow.add_edge("respond", END)
 
     return workflow
+
+
+# ============================================================
+# 流式输出辅助
+# ============================================================
+
+def _yield_stream_event(node_name: str, node_state: dict):
+    """将图节点事件转为流式标签 yield（生成器辅助函数）"""
+    # respond 节点只负责持久化，不产出行内输出
+    if node_name == "respond":
+        return
+
+    if node_name == "re_evaluate":
+        pass  # 静默执行
+    elif node_name == "fast_track":
+        yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
+    elif node_name == "action_track":
+        yield "[ACTION] ⚡ 动作通道 · 工单派发\n"
+    elif node_name == "complex_track":
+        yield "[COMPLEX] 🧩 复杂通道 · 多步骤编排\n"
+    elif node_name == "clarification":
+        yield "[CLARIFY] 🤔 AI 需要确认您的意图\n"
+    elif node_name == "route":
+        track = node_state.get("track", "")
+        if track and track not in ("action", "re_evaluate"):
+            track_names = {
+                "fast": "🔍 极速通道 · 企业知识库问答",
+                "action": "⚡ 动作通道 · 工单派发",
+                "complex": "🧩 复杂通道 · 多步骤编排",
+            }
+            yield f"[ROUTE] {track_names.get(track, track)}\n"
+
+    # 文本 / 卡片输出
+    resp = node_state.get("final_response", "")
+    if not resp:
+        return
+    if "[CARD]" in resp:
+        parts = resp.split("[CARD]", 1)
+        text_part = parts[0].strip()
+        card_part = parts[1].strip() if len(parts) > 1 else ""
+        if text_part:
+            yield f"[STREAM]{text_part}\n"
+        if card_part:
+            yield f"[CARD]{card_part}\n"
+    else:
+        yield f"[STREAM]{resp}\n"
 
 
 # ============================================================
@@ -606,14 +900,24 @@ class OrchestrationWorkflowRunner:
         initial_state = create_initial_state(user_input, thread_id)
         config = {"configurable": {"thread_id": thread_id}}
 
-        # ================================================================
-        # 卡片锁模式：检测上一轮是否留下了 pending_card
-        # ================================================================
+        # ── 从 checkpointer 恢复 v4 对话阶段状态 ──
+        # messages 由 LangGraph add_messages reducer 自动合并，无需手动处理。
+        # 但 conversation_phase 等普通字段会被 initial_state 覆盖，需手动恢复。
         prev = self.app.get_state(config)
         pending_card = ""
         if prev and prev.values:
             pending_card = prev.values.get("pending_card_type", "")
-            # 传递上一轮的 agent_results（含卡片数据）
+
+            # v4: 继承 self_help_provided 阶段状态
+            if prev.values.get("conversation_phase") == "self_help_provided":
+                initial_state["conversation_phase"] = "self_help_provided"
+                initial_state["last_rag_topic"] = prev.values.get("last_rag_topic", "")
+                initial_state["last_rag_summary"] = prev.values.get("last_rag_summary", "")
+                logger.info(
+                    f"[Stream] 恢复 self_help_provided, "
+                    f"topic={initial_state['last_rag_topic']}"
+                )
+            # 继承卡片数据
             if pending_card:
                 prev_agent_results = prev.values.get("agent_results", {})
                 if prev_agent_results:
@@ -631,159 +935,45 @@ class OrchestrationWorkflowRunner:
                 for node_name, node_state in event.items():
                     if node_name == "action_track":
                         yield "[ACTION] ⚡ 动作通道 · 处理卡片回复\n"
-                        resp = node_state.get("final_response", "")
-                        if resp:
-                            if "[CARD]" in resp:
-                                parts = resp.split("[CARD]", 1)
-                                text_part = parts[0].strip()
-                                card_part = parts[1].strip() if len(parts) > 1 else ""
-                                if text_part:
-                                    yield f"[STREAM]{text_part}\n"
-                                if card_part:
-                                    yield f"[CARD]{card_part}\n"
-                            else:
-                                yield f"[STREAM]{resp}\n"
-
                         if node_state.get("re_route"):
                             yield "[ROUTE] 🔄 切换话题，重新分析...\n"
                             yield "[THINKING] 🔍 正在路由到对应轨道...\n"
-
-                    elif node_name == "route":
-                        # 重路由后的 route_node，静默
-                        track = node_state.get("track", "")
-                        if track and track != "action":
-                            track_names = {
-                                "fast": "🔍 极速通道 · 企业知识库问答",
-                                "action": "⚡ 动作通道 · 工单派发",
-                                "complex": "🧩 复杂通道 · 多步骤编排",
-                            }
-                            yield f"[ROUTE] {track_names.get(track, track)}\n"
-
-                    elif node_name in ("fast_track", "complex_track", "clarification"):
-                        if node_name == "fast_track":
-                            yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
-                        elif node_name == "complex_track":
-                            yield "[COMPLEX] 🧩 复杂通道 · 多步骤编排\n"
-                        elif node_name == "clarification":
-                            yield "[CLARIFY] 🤔 AI 需要确认您的意图\n"
-                        resp = node_state.get("final_response", "")
-                        if resp:
-                            yield f"[STREAM]{resp}\n"
-
-                    elif node_name == "respond":
-                        pass
+                    for _y in _yield_stream_event(node_name, node_state):
+                        yield _y
 
             yield "[DONE]\n"
             return
 
         # ================================================================
-        # 非锁模式（现有逻辑）
+        # 非锁模式：graph 全权接管
+        #
+        # stream_mode=["updates","custom"]:
+        #   "updates" → {node_name: changed_state} → _yield_stream_event 翻译标签
+        #   "custom"  → StreamWriter token → 直接转为 [STREAM]
+        #
+        # checkpointer 自动合并 history / 持久化 state。
         # ================================================================
         yield "[THINKING] 🔍 正在分析您的问题...\n"
 
-        # 先用 route_node 拿到路由结果
-        from agents.orchestrator.router import Router
-        from agents.orchestrator.agent_registry import agent_registry
-
-        routed_state = await route_node(initial_state)
-        track = routed_state.get("track", "clarify")
-        confidence = routed_state.get("confidence", 0)
-
-        # --- 路由结果 ---
-        if track == "clarify" or confidence < 0.3:
-            yield "[ROUTE] 🤔 AI 需要确认您的意图\n"
-            yield "[THINKING] 💭 正在组织追问...\n"
-        else:
-            track_names = {
-                "fast": "🔍 极速通道 · 企业知识库问答",
-                "action": "⚡ 动作通道 · 工单派发",
-                "complex": "🧩 复杂通道 · 多步骤编排",
-            }
-            yield f"[ROUTE] {track_names.get(track, track)}\n"
-
-            track_thinking = {
-                "fast": "📚 向量检索知识库，生成回答...",
-                "action": "⚡ 分析工单需求，提取参数...",
-                "complex": "🧩 分析复合指令，制定计划...",
-            }
-            yield f"[THINKING] {track_thinking.get(track, '处理中...')}\n"
-
-        if routed_state.get("needs_human_review"):
-            yield "[THINKING] ⚠️ 此操作可能需要人工审核...\n"
-
-        # --- 真流式：fast_track ---
-        if track == "fast":
-            yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
-            yield "[THINKING] ✍️ 正在基于检索结果生成回答...\n"
-
-            try:
-                from agents.sub_agents.enterprise_rag import EnterpriseRAGAgent
-
-                rag = EnterpriseRAGAgent()
-                await rag._ensure_initialized()
-
-                # 检索
-                docs = await rag.knowledge_service.search(user_input, top_k=5)
-
-                if not docs:
-                    final = routed_state.get("final_response", "")
-                    if not final:
-                        # 运行完整节点
-                        result_state = await fast_track_node(routed_state)
-                        final = result_state.get("final_response", "")
-                    yield f"[STREAM]{final}\n"
-                else:
-                    # 真流式：逐 token yield
-                    conversation_history = _build_conversation_context(
-                        routed_state.get("messages", []),
-                    )
-                    async for token in rag._synthesize_stream(
-                        user_input, docs, conversation_history,
-                    ):
-                        yield f"[STREAM]{token}\n"
-
-                yield "[DONE]\n"
-                return
-
-            except Exception as e:
-                logger.error(f"[Stream] fast_track 流式失败: {e}，降级为完整节点")
-                result_state = await fast_track_node(routed_state)
-                resp = result_state.get("final_response", "处理出错，请重试。")
-                yield f"[STREAM]{resp}\n"
-                yield "[DONE]\n"
-                return
-
-        # --- 其他轨道：使用 LangGraph astream（完整节点模式）---
-        # 使用已路由的状态继续执行
-        async for event in self.app.astream(routed_state, config):
-            for node_name, node_state in event.items():
-                if node_name == "fast_track":
-                    yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
-                elif node_name == "action_track":
-                    yield "[ACTION] ⚡ 动作通道 · 工单派发\n"
-                    yield "[THINKING] 📝 正在创建工单...\n"
-                elif node_name == "complex_track":
-                    yield "[COMPLEX] 🧩 复杂通道 · 多步骤编排\n"
-                    yield "[THINKING] 🔗 委派多个Agent协作处理...\n"
-                elif node_name == "clarification":
-                    yield "[CLARIFY] 🤔 AI 需要确认您的意图\n"
-                    yield "[THINKING] 💬 正在生成反问引导...\n"
-
-                # 非 fast_track 的流式输出
-                if node_name in ("action_track", "complex_track", "clarification"):
-                    resp = node_state.get("final_response", "")
-                    if resp:
-                        # 检查是否包含确认卡片
-                        if "[CARD]" in resp:
-                            parts = resp.split("[CARD]", 1)
-                            text_part = parts[0].strip()
-                            card_part = parts[1].strip() if len(parts) > 1 else ""
-                            if text_part:
-                                yield f"[STREAM]{text_part}\n"
-                            if card_part:
-                                yield f"[CARD]{card_part}\n"
-                        else:
-                            yield f"[STREAM]{resp}\n"
+        async for event in self.app.astream(
+            initial_state, config, stream_mode=["updates", "custom"],
+        ):
+            if isinstance(event, tuple) and len(event) == 2:
+                mode, data = event
+                if mode == "custom":
+                    # StreamWriter 发射的 token → [STREAM]
+                    yield f"[STREAM]{data}\n"
+                    continue
+                elif mode == "updates":
+                    # {node_name: changed_state} → _yield_stream_event
+                    for node_name, node_state in data.items():
+                        for _y in _yield_stream_event(node_name, node_state):
+                            yield _y
+            else:
+                # 兼容 fallback
+                for node_name, node_state in event.items():
+                    for _y in _yield_stream_event(node_name, node_state):
+                        yield _y
 
         yield "[DONE]\n"
 

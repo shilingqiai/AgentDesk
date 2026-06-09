@@ -102,6 +102,33 @@ class EnterpriseRAGAgent(BaseSubAgent):
         )
 
         try:
+            # ── 短路检查：用户是否在表达"之前的方案无效" ──
+            pre_escalation = self._check_user_escalation_signal(
+                user_input, conversation_history
+            )
+            if pre_escalation:
+                self.logger.info(
+                    "[EnterpriseRAG] 检测到升级信号，跳过检索直接建议工单"
+                )
+                return AgentMessage.create_response(
+                    from_agent=self.agent_id,
+                    to_agent=message.from_agent,
+                    payload={
+                        "direct_response": (
+                            "我理解，之前的排查步骤没有解决您的问题。\n\n"
+                            "建议您提交一个工单，让工程师直接介入处理。"
+                            "工单系统会记录您的问题并分配专人跟进。\n\n"
+                            "您可以回复「帮我创建IT故障工单」来快速提交。"
+                        ),
+                        "sources": [],
+                        "confidence": 0.9,
+                        "needs_escalation": True,
+                        "summary": "用户表示排障方案无效，建议工单",
+                    },
+                    original_message=message,
+                    success=True,
+                )
+
             # 1. FAISS 向量检索 — 跨所有领域，不设 category 过滤
             docs = await self.knowledge_service.search(user_input, top_k=5)
 
@@ -162,12 +189,30 @@ class EnterpriseRAGAgent(BaseSubAgent):
         """LLM 合成回答 — 基于跨领域检索到的文档"""
         doc_context = self._build_doc_context(docs)
 
+        # 检测用户是否在表达"之前的方案无效"
+        escalation_signals = [
+            "还是不行", "还是连不上", "无法解决", "没用", "试过了",
+            "还是不能", "依然无法", "仍然不行", "解决不了", "搞不定",
+            "没解决", "不行啊", "照样", "仍然连不上",
+        ]
+        is_escalation = any(sig in user_input for sig in escalation_signals)
+
         history_section = ""
         if conversation_history:
             history_section = (
                 f"## 对话历史\n{conversation_history}\n\n"
-                f"注意：如果用户当前是追问，请结合历史上下文理解。\n\n"
             )
+            if is_escalation:
+                history_section += (
+                    "**重要上下文**：对话历史显示你刚才提供了排障方案，"
+                    "但用户表示方案无效、问题仍未解决。\n"
+                    "你的任务不是重复相同的排障步骤，而是应该：\n"
+                    "1. 简短确认你理解问题仍然存在\n"
+                    "2. 明确建议用户提交工单，让工程师介入处理\n"
+                    "3. 不要再列出相同的排查步骤！！\n\n"
+                )
+            else:
+                history_section += "注意：如果用户当前是追问，请结合历史上下文理解。\n\n"
 
         prompt = (
             f"你是一个企业员工服务台的AI助手。请根据以下知识库文档回答用户问题。\n\n"
@@ -180,7 +225,8 @@ class EnterpriseRAGAgent(BaseSubAgent):
             f"2. 如果文档只部分覆盖了问题，诚实告知\n"
             f"3. 如果涉及多个领域（如IT+HR），自然整合\n"
             f"4. 简洁清晰，控制在300字以内\n"
-            f"5. 如有必要，引导用户到正确的操作渠道（OA、飞书、工单系统等）"
+            f"5. 如有必要，引导用户到正确的操作渠道（OA、飞书、工单系统等）\n"
+            f"6. 如果用户之前收到过相同答案并表示无效，不要重复！建议提交工单"
         )
 
         try:
@@ -250,7 +296,46 @@ class EnterpriseRAGAgent(BaseSubAgent):
             fallback = f"根据知识库检索结果：\n\n{top_doc.get('content', '')[:500]}"
             yield fallback
 
-    def _check_escalation_needed(self, response: str, docs: list[dict]) -> bool:
+    @staticmethod
+    def _check_user_escalation_signal(
+        user_input: str, conversation_history: str = "",
+    ) -> bool:
+        """
+        检查用户输入是否在表达"之前的方案无效，需要升级"。
+
+        条件：
+        1. 用户输入包含升级信号词（还是不行/无法解决等）
+        2. 对话历史显示助手之前提供过排障方案
+        """
+        escalation_signals = [
+            "还是不行", "还是连不上", "无法解决", "没用", "试过了",
+            "还是不能", "依然无法", "仍然不行", "解决不了", "搞不定",
+            "没解决", "不行啊", "照样", "仍然连不上", "还是没用",
+            "按照你说的做了", "按照步骤", "所有步骤都",
+        ]
+
+        has_signal = any(sig in user_input for sig in escalation_signals)
+        if not has_signal:
+            return False
+
+        # 确认对话历史中有助手回复过（说明之前给过方案）
+        has_history = bool(conversation_history and conversation_history.strip())
+        if not has_history:
+            return False
+
+        # 历史中包含排障相关关键词
+        troubleshoot_keywords = [
+            "步骤", "检查", "确认", "尝试", "方案", "解决",
+            "VPN", "连接", "网络", "故障", "排查", "重启",
+        ]
+        has_troubleshooting = any(
+            kw in conversation_history for kw in troubleshoot_keywords
+        )
+        return has_troubleshooting
+
+    def _check_escalation_needed(
+        self, response: str, docs: list[dict],
+    ) -> bool:
         """检查是否需要升级为工单"""
         # 所有文档相关度都很低 → 可能需要升级
         if docs and all(d.get("score", 0) < 0.3 for d in docs):
@@ -258,7 +343,7 @@ class EnterpriseRAGAgent(BaseSubAgent):
         # 回答中包含升级信号词
         escalation_signals = [
             "无法解决", "需要人工", "建议提交工单", "请联系",
-            "暂时无法", "超出范围", "需要工程师",
+            "暂时无法", "超出范围", "需要工程师", "工单",
         ]
         if any(sig in response for sig in escalation_signals):
             return True
