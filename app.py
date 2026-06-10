@@ -105,6 +105,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # 身份注入中间件（从 Header 解析 X-User-Name / X-User-Role）
+    from web.routes import IdentityMiddleware
+    app.add_middleware(IdentityMiddleware)
+
     from api.exceptions import api_exception_handler, general_exception_handler, BusinessException
     app.add_exception_handler(BusinessException, api_exception_handler)
     app.add_exception_handler(Exception, general_exception_handler)

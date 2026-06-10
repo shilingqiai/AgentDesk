@@ -13,6 +13,9 @@
 from __future__ import annotations
 
 import os
+import ssl
+import httpx
+import certifi
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import SecretStr
 
@@ -21,6 +24,35 @@ from pydantic import SecretStr
 
 # 默认 base_url — 阿里云 DashScope 兼容接口
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# certifi 证书上下文（修复 Windows Python SSL 问题）
+_ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+# 共享的 httpx 客户端，使用 certifi 证书
+_shared_http_client = None
+_shared_async_http_client = None
+
+
+def _get_http_client() -> httpx.Client:
+    """获取共享的 httpx 同步客户端（使用 certifi 证书）"""
+    global _shared_http_client
+    if _shared_http_client is None:
+        _shared_http_client = httpx.Client(
+            verify=_ssl_context,
+            timeout=60.0,
+        )
+    return _shared_http_client
+
+
+def _get_async_http_client() -> httpx.AsyncClient:
+    """获取共享的 httpx 异步客户端（使用 certifi 证书）"""
+    global _shared_async_http_client
+    if _shared_async_http_client is None:
+        _shared_async_http_client = httpx.AsyncClient(
+            verify=_ssl_context,
+            timeout=60.0,
+        )
+    return _shared_async_http_client
 
 
 def get_api_key() -> str:
@@ -51,6 +83,8 @@ def create_chat_model(model_type: str = "main", temperature: float = 0):
         api_key=SecretStr(get_api_key()),
         base_url=get_base_url(),
         temperature=temperature,
+        http_client=_get_http_client(),
+        http_async_client=_get_async_http_client(),
     )
 
 

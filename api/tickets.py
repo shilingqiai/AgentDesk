@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from db.db_router import DatabaseRouter
 
@@ -46,22 +48,61 @@ class TicketStatusUpdate(BaseModel):
 
 @router.get("/", summary="获取工单列表")
 async def list_tickets(
+    request: Request,
     ticket_type: Optional[str] = Query(default=None, description="类型筛选"),
     status: Optional[str] = Query(default=None, description="状态筛选"),
     priority: Optional[str] = Query(default=None, description="优先级筛选"),
+    requester_id: Optional[str] = Query(default=None, description="按申请人筛选"),
+    user_name: Optional[str] = Query(default=None, description="当前用户（员工只看自己的）"),
+    role: Optional[str] = Query(default="employee", description="角色: employee | admin"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """获取工单列表，支持多条件筛选"""
+    """
+    获取工单列表，支持多条件筛选。
+
+    RBAC: 员工只能看自己提交的工单，管理员可看全部。
+    身份来源：Header 注入 > Query 参数
+    """
     try:
+        # 身份解析：Header > Query 参数
+        resolved_user = (
+            getattr(request.state, "user_name", "")
+            or user_name or ""
+        )
+        resolved_role = (
+            getattr(request.state, "role", "")
+            or role or "employee"
+        )
+
         db = DatabaseRouter()
+
+        # 员工只能看自己的工单，管理员看全部
+        effective_requester = requester_id
+        if resolved_role != "admin" and resolved_user:
+            # 员工：强制过滤自己的工单（忽略前端传的 requester_id）
+            effective_requester = resolved_user
+
         tickets = db.ticket.list_tickets(
             ticket_type=ticket_type,
             status=status,
             priority=priority,
+            requester_id=effective_requester,
             limit=limit,
             offset=offset,
         )
+
+        # 向后兼容：如果员工过滤后为空，补充 requester_id 为空的历史工单
+        if effective_requester and len(tickets) == 0:
+            tickets = db.ticket.list_tickets(
+                ticket_type=ticket_type,
+                status=status,
+                priority=priority,
+                requester_id="",
+                limit=limit,
+                offset=offset,
+            )
+
         total = db.ticket.get_ticket_count(ticket_type=ticket_type)
         return {
             "status": "success",
@@ -69,6 +110,10 @@ async def list_tickets(
             "total": total,
             "limit": limit,
             "offset": offset,
+            "viewer": {
+                "user_name": resolved_user,
+                "role": resolved_role,
+            },
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取工单列表失败: {str(e)}")
@@ -191,15 +236,31 @@ async def create_ticket(request: TicketCreateRequest):
         raise HTTPException(status_code=500, detail=f"创建工单失败: {str(e)}")
 
 
-@router.put("/{ticket_id}/status", summary="更新工单状态")
-async def update_ticket_status(ticket_id: int, update: TicketStatusUpdate):
-    """更新工单状态"""
+@router.put("/{ticket_id}/status", summary="更新工单状态（管理员）")
+async def update_ticket_status(
+    ticket_id: int,
+    update: TicketStatusUpdate,
+    request: Request,
+    user_name: Optional[str] = Query(default=None),
+    role: Optional[str] = Query(default="employee"),
+):
+    """
+    更新工单状态。仅管理员可操作。
+
+    Header 身份优先于 Query 参数。
+    """
+    resolved_role = getattr(request.state, "role", "") or role or "employee"
+    resolved_user = getattr(request.state, "user_name", "") or user_name or ""
+
+    if resolved_role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可更新工单状态")
+
     try:
         db = DatabaseRouter()
         success = db.ticket.update_status(
             ticket_id=ticket_id,
             new_status=update.status,
-            assigned_to=update.assigned_to,
+            assigned_to=update.assigned_to or resolved_user,
         )
         if not success:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -211,6 +272,99 @@ async def update_ticket_status(ticket_id: int, update: TicketStatusUpdate):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新失败: {str(e)}")
+
+
+@router.post("/{ticket_id}/approve", summary="审批通过（管理员）")
+async def approve_ticket(
+    ticket_id: int,
+    request: Request,
+    user_name: Optional[str] = Query(default=None),
+    role: Optional[str] = Query(default="employee"),
+):
+    """
+    管理员审批通过工单（如请假申请）。
+
+    将工单状态改为 resolved，记录审批人。
+    """
+    resolved_role = getattr(request.state, "role", "") or role or "employee"
+    resolved_user = getattr(request.state, "user_name", "") or user_name or ""
+
+    if resolved_role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可审批工单")
+
+    try:
+        db = DatabaseRouter()
+        ticket = db.ticket.get_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+
+        success = db.ticket.update_status(
+            ticket_id=ticket_id,
+            new_status="resolved",
+            assigned_to=resolved_user,
+        )
+        if not success:
+            raise HTTPException(status_code=500, detail="更新失败")
+
+        return {
+            "status": "success",
+            "message": f"工单 {ticket['ticket_number']} 已审批通过",
+            "approved_by": resolved_user,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"审批失败: {str(e)}")
+
+
+@router.post("/{ticket_id}/reject", summary="审批驳回（管理员）")
+async def reject_ticket(
+    ticket_id: int,
+    request: Request,
+    reason: Optional[str] = Query(default="", description="驳回理由"),
+    user_name: Optional[str] = Query(default=None),
+    role: Optional[str] = Query(default="employee"),
+):
+    """
+    管理员驳回工单（如请假申请）。
+
+    将工单状态改为 closed，记录驳回理由到 payload。
+    """
+    resolved_role = getattr(request.state, "role", "") or role or "employee"
+    resolved_user = getattr(request.state, "user_name", "") or user_name or ""
+
+    if resolved_role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可审批工单")
+
+    try:
+        db = DatabaseRouter()
+        ticket = db.ticket.get_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+
+        # 记录驳回信息到 payload
+        payload = ticket.get("payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        payload["rejected_by"] = resolved_user
+        payload["rejected_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        payload["reject_reason"] = reason or "未提供理由"
+
+        db.ticket.update_ticket(ticket_id, status="closed", payload=payload)
+
+        return {
+            "status": "success",
+            "message": f"工单 {ticket['ticket_number']} 已驳回",
+            "rejected_by": resolved_user,
+            "reason": reason,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"驳回失败: {str(e)}")
 
 
 @router.delete("/{ticket_id}", summary="删除工单（软删除）")

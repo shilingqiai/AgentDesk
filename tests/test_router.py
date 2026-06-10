@@ -79,10 +79,10 @@ class TestRouterDecision:
         assert "VPN" in result.reason
 
     @pytest.mark.asyncio
-    async def test_action_track_leave_fc(self):
-        """action 轨道：请假申请 — Function Calling"""
+    async def test_complex_track_leave_fc(self):
+        """complex 轨道：请假申请 — Function Calling（v6 请假→complex）"""
         mock_llm = make_mock_llm_with_tool_calls(
-            "action", confidence=0.90, reason="用户申请请假"
+            "complex", confidence=0.90, reason="用户申请请假，需合规检查"
         )
 
         with patch("agents.orchestrator.router.create_chat_model",
@@ -95,14 +95,14 @@ class TestRouterDecision:
                 agent_descriptions="enterprise_rag, ticket_dispatch",
             )
 
-        assert result.track == "action"
+        assert result.track == "complex"
         assert result.confidence == 0.90
 
     @pytest.mark.asyncio
-    async def test_action_track_it_fc(self):
-        """action 轨道：IT 故障工单 — Function Calling"""
+    async def test_action_create_track_it_fc(self):
+        """action_create 轨道：IT 故障工单 — Function Calling"""
         mock_llm = make_mock_llm_with_tool_calls(
-            "action", confidence=0.88, reason="用户提交IT故障工单",
+            "action_create", confidence=0.88, reason="用户提交IT故障工单",
             requires_tools=["jira_api"],
         )
 
@@ -116,7 +116,7 @@ class TestRouterDecision:
                 agent_descriptions="enterprise_rag, ticket_dispatch",
             )
 
-        assert result.track == "action"
+        assert result.track == "action_create"
         assert result.requires_tools == ["jira_api"]
 
     @pytest.mark.asyncio
@@ -259,12 +259,12 @@ class TestRouteResult:
         assert result.agent_id == "enterprise_rag"
         assert result.category == "knowledge_query"
 
-    def test_from_decision_action(self):
-        """从 RouterDecision 创建 RouteResult（action）"""
+    def test_from_decision_action_create(self):
+        """从 RouterDecision 创建 RouteResult（action_create）"""
         decision = RouterDecision(
-            track="action", confidence=0.88, reason="创建工单",
+            track="action_create", confidence=0.88, reason="创建工单",
         )
         result = RouteResult.from_decision(decision)
-        assert result.track == "action"
+        assert result.track == "action_create"
         assert result.agent_id == "ticket_dispatch"
         assert result.urgency == "low"

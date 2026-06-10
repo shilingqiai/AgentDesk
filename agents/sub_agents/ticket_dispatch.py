@@ -324,6 +324,10 @@ class TicketDispatchSubAgent(BaseSubAgent):
         )
 
         try:
+            # ── v6: pre_checked 路径（complex track 已完成 RAG + ToolAgent 并行查询）──
+            if message.payload.get("pre_checked"):
+                return await self._execute_compliance_check(message)
+
             # 1. 使用 LLM 提取工单参数（含类型识别）
             ticket_params = await self._extract_params(
                 user_input, urgency, conversation_history,
@@ -351,6 +355,10 @@ class TicketDispatchSubAgent(BaseSubAgent):
             # 2. 构建 payload（扩展字段）
             extra_payload = self._build_extra_payload(ticket_type, ticket_params)
 
+            # 2.5 身份信息（从委派消息中提取）
+            requester_id = message.payload.get("user_id", "") or message.payload.get("user_name", "")
+            requester_name = message.payload.get("user_name", "") or requester_id
+
             # 3. 创建工单（写入 DB）
             ticket = self.db_router.ticket.add_ticket(
                 ticket_type=ticket_type,
@@ -358,7 +366,8 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 description=ticket_params.get("description", user_input),
                 category=ticket_params.get("category", "其他"),
                 priority=ticket_params.get("priority", "P2"),
-                requester_id=message.payload.get("user_id", ""),
+                requester_id=requester_id,
+                requester_name=requester_name,
                 trace_id=message.trace_id,
                 payload=extra_payload,
             )
@@ -390,6 +399,214 @@ class TicketDispatchSubAgent(BaseSubAgent):
         except Exception as e:
             self.logger.error(f"工单派发失败: {e}")
             return self.create_error_response(message, str(e))
+
+    async def _execute_compliance_check(self, message: AgentMessage) -> AgentMessage:
+        """
+        v6: 合规检查路径（complex track 已完成 RAG + ToolAgent 并行查询）。
+
+        输入 payload 包含：
+          - user_input: 用户原始请求
+          - policy_result: RAG 政策查询结果
+          - balance_result: ToolAgent 余额查询结果
+          - user_name / role: 用户身份
+
+        流程：
+          1. LLM 合规检查（政策 vs 余额 vs 用户请求）
+          2. 生成确认卡片（含余额信息 + 合规结论）
+        """
+        user_input = message.payload.get("user_input", "")
+        policy_result = message.payload.get("policy_result", {})
+        balance_result = message.payload.get("balance_result", {})
+        user_name = message.payload.get("user_name", "")
+
+        policy_text = policy_result.get("policy_text", "")
+        balance_data = balance_result.get("tool_result", {})
+        balance_text = balance_result.get("direct_response", "")
+
+        self.logger.info(
+            f"[TicketDispatch:compliance] 合规检查 — "
+            f"user={user_name}, policy_len={len(policy_text)}, balance_keys={list(balance_data.keys()) if balance_data else 'none'}"
+        )
+
+        # 1. 提取请求参数（轻量级，不需要重新做 RAG）
+        try:
+            params = await self._extract_params(user_input)
+        except Exception:
+            params = self._fallback_extract(user_input, "medium")
+
+        ticket_type = params.get("ticket_type", "leave")
+        extra = params.get("extra", {})
+
+        # 2. LLM 合规检查
+        from config.model_provider import create_chat_model
+        check_llm = create_chat_model(temperature=0)
+
+        leave_type = extra.get("leave_type", "年假")
+        start_date = extra.get("start_date", "")
+        end_date = extra.get("end_date", "")
+        total_days = extra.get("total_days", 0)
+
+        check_prompt = (
+            "你是一个请假合规检查器。根据政策、余额和用户请求，进行合规检查。\n\n"
+            f"## 年假政策\n{policy_text[:800] if policy_text else '未查到相关政策'}\n\n"
+            f"## 员工余额\n{balance_text if balance_text else '未查到余额数据'}\n"
+            f"余额 JSON: {json.dumps(balance_data, ensure_ascii=False) if balance_data else '无'}\n\n"
+            f"## 用户请求\n{user_input}\n\n"
+            f"## 已提取参数\n"
+            f"- 请假类型: {leave_type}\n"
+            f"- 开始日期: {start_date or '未指定'}\n"
+            f"- 结束日期: {end_date or '未指定'}\n"
+            f"- 天数: {total_days or '未指定'}\n\n"
+            "## 检查项\n"
+            "1. 请假天数是否 ≤ 最长连续休假天数\n"
+            "2. 剩余年假是否 ≥ 请假天数\n"
+            "3. 日期是否在封账期内\n"
+            "4. 是否触发审批要求\n\n"
+            "返回 JSON（不要 markdown 包裹）：\n"
+            '{"passed": true/false, '
+            '"checks": [{"name":"...", "passed":true/false, "detail":"..."}], '
+            '"warnings": ["..."], '
+            '"compliance_summary": "一句话总结合规检查结果"}'
+        )
+
+        try:
+            response = await check_llm.ainvoke([{"role": "user", "content": check_prompt}])
+            check_data = self._parse_json(response.content)
+        except Exception as e:
+            self.logger.warning(f"[compliance] 合规检查 LLM 失败: {e}，默认通过")
+            check_data = {
+                "passed": True,
+                "checks": [{"name": "合规检查", "passed": True, "detail": "自动通过（检查服务暂不可用）"}],
+                "warnings": [],
+                "compliance_summary": "合规检查自动通过",
+            }
+
+        passed = check_data.get("passed", False)
+        checks = check_data.get("checks", [])
+        warnings = check_data.get("warnings", [])
+        compliance_summary = check_data.get("compliance_summary", "")
+
+        self.logger.info(
+            f"[compliance] 检查完成: passed={passed}, checks={len(checks)}, warnings={len(warnings)}"
+        )
+
+        # 3. 构建增强卡片（含余额 + 合规信息）
+        annual_remaining = balance_data.get("annual_leave_remaining", "?")
+        annual_total = balance_data.get("annual_leave_total", "?")
+        annual_used = balance_data.get("annual_leave_used", "?")
+
+        # 描述文本
+        desc_parts = ["📋 **请假合规预检查**\n"]
+        desc_parts.append(f"👤 **申请人**：{user_name}")
+        desc_parts.append(f"🏖️ **请假类型**：{leave_type}")
+
+        if total_days:
+            desc_parts.append(f"📅 **天数**：{total_days} 天")
+        if start_date:
+            desc_parts.append(f"📅 **开始日期**：{start_date}")
+        if end_date:
+            desc_parts.append(f"📅 **结束日期**：{end_date}")
+
+        desc_parts.append(f"\n💰 **假期余额**：")
+        desc_parts.append(f"- 年假总额：{annual_total} 天")
+        desc_parts.append(f"- 已用：{annual_used} 天")
+        desc_parts.append(f"- 剩余：**{annual_remaining} 天**")
+
+        if total_days and isinstance(annual_remaining, (int, float)) and annual_remaining != "?":
+            after = annual_remaining - total_days
+            desc_parts.append(f"- 请假后剩余：**{after} 天**")
+
+        desc_parts.append(f"\n🔍 **合规检查结果**：{'✅ 通过' if passed else '❌ 未通过'}")
+        for check in checks:
+            icon = "✅" if check.get("passed") else "❌"
+            desc_parts.append(f"  {icon} {check.get('name', '')}: {check.get('detail', '')}")
+        if warnings:
+            for w in warnings:
+                desc_parts.append(f"  ⚠️ {w}")
+
+        if compliance_summary:
+            desc_parts.append(f"\n💡 {compliance_summary}")
+
+        # 4. 构建卡片
+        from datetime import datetime as dt, timedelta
+
+        # 日期默认值
+        today = dt.now()
+        default_start = start_date or today.strftime("%Y-%m-%d")
+        default_end = end_date or (today + timedelta(days=total_days - 1 if total_days else 0)).strftime("%Y-%m-%d")
+
+        card = {
+            "type": "confirm",
+            "title": "🏖️ 请假申请（合规预检查）",
+            "description": "\n".join(desc_parts),
+            "fields": [
+                {
+                    "key": "leave_type", "label": "请假类型", "type": "select",
+                    "options": [
+                        {"value": "年假", "label": "年假"},
+                        {"value": "病假", "label": "病假"},
+                        {"value": "事假", "label": "事假"},
+                        {"value": "调休", "label": "调休"},
+                        {"value": "婚假", "label": "婚假"},
+                    ],
+                    "value": leave_type,
+                    "required": True,
+                },
+                {
+                    "key": "start_date", "label": "开始日期", "type": "date",
+                    "value": default_start, "required": True,
+                },
+                {
+                    "key": "end_date", "label": "结束日期", "type": "date",
+                    "value": default_end, "required": True,
+                },
+                {
+                    "key": "total_days", "label": "天数", "type": "number",
+                    "value": str(total_days) if total_days else "",
+                    "min": 1, "max": 30,
+                    "required": True,
+                },
+            ],
+            "confirm_text": "提交请假申请",
+            "action": "/api/tickets/",
+            "method": "POST",
+            "body_template": {
+                "user_input": user_input,
+                "ticket_type": "leave",
+                "priority": params.get("priority", "P2"),
+            },
+            "success_message": "请假申请已提交！可在工单管理页面查看进度。",
+            "fallback_url": "/tickets",
+            "fallback_text": "查看工单",
+            # 附加合规信息（前端可展示）
+            "compliance": {
+                "passed": passed,
+                "checks": checks,
+                "warnings": warnings,
+                "annual_remaining": annual_remaining,
+            },
+        }
+
+        # 如果合规未通过，添加警告 alerts
+        if not passed:
+            card["alerts"] = [
+                {"type": "warning", "message": f"⚠️ 合规检查未通过，请检查后重新提交。{compliance_summary}"}
+            ]
+
+        return AgentMessage.create_response(
+            from_agent=self.agent_id,
+            to_agent=message.from_agent,
+            payload={
+                "direct_response": "",
+                "return_card": True,
+                "card": card,
+                "ticket_type": ticket_type,
+                "summary": f"[请假申请·合规预检查] {'✅通过' if passed else '❌未通过'} | 剩余年假: {annual_remaining}天",
+                "compliance_result": check_data,
+            },
+            original_message=message,
+            success=True,
+        )
 
     @staticmethod
     def _should_return_card(ticket_type: str, params: dict) -> bool:
@@ -2087,7 +2304,8 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 description=description,
                 category=body_template.get("category", "其他"),
                 priority=priority,
-                requester_id="web_user",
+                requester_id=fields.get("requester_name", "web_user"),
+                requester_name=fields.get("requester_name", ""),
                 trace_id=f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}",
                 payload={},
             )

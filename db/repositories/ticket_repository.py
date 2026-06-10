@@ -155,6 +155,7 @@ class TicketRepository:
         allowed_fields = {
             "status", "priority", "assigned_to", "title",
             "description", "category", "payload", "ticket_type",
+            "requester_id", "requester_name",
         }
         filtered = {k: v for k, v in updates.items() if k in allowed_fields}
         if not filtered:

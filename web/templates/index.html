@@ -82,6 +82,57 @@
             padding-left: 32px;
         }
 
+        /* Identity Selector */
+        .identity-selector {
+            margin-top: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .identity-selector label {
+            font-size: 11px;
+            color: var(--text-sidebar-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+        .identity-selector select {
+            width: 100%;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.06);
+            color: #fff;
+            font-size: 13px;
+            font-family: inherit;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .identity-selector select:focus {
+            border-color: var(--accent);
+        }
+        .identity-selector select option {
+            background: #1a1a2e;
+            color: #fff;
+        }
+        .identity-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .identity-badge.employee {
+            background: rgba(0,184,148,0.15);
+            color: #55efc4;
+        }
+        .identity-badge.admin {
+            background: rgba(253,203,110,0.15);
+            color: #fdcb6e;
+        }
+
         .sidebar-section {
             padding: 16px 20px;
             border-bottom: 1px solid rgba(255,255,255,0.06);
@@ -728,23 +779,37 @@
                 企业智能服务台
             </div>
             <div class="sidebar-subtitle">Copilot Studio 多Agent编排</div>
+            <div class="identity-selector">
+                <label><i class="fas fa-user-circle"></i> 当前身份</label>
+                <select id="identity-select" onchange="onIdentityChange()">
+                    <option value="张三">👤 张三 (员工)</option>
+                    <option value="李四">👤 李四 (员工)</option>
+                    <option value="王五">👤 王五 (员工)</option>
+                    <option value="赵六">👤 赵六 (员工)</option>
+                    <option value="管理员">🔸 管理员</option>
+                </select>
+                <div style="margin-top:4px;" id="identity-badge-display"></div>
+            </div>
         </div>
 
         <!-- Hub & Spoke Routing -->
         <div class="sidebar-section">
-            <div class="sidebar-section-title">Hub & Spoke 三轨道路由</div>
+            <div class="sidebar-section-title">Hub & Spoke 五轨道路由</div>
             <div class="pipeline" id="pipeline">
                 <div class="pipeline-step" data-track="route">
                     <span class="step-dot"></span> 🔀 智能路由
                 </div>
                 <div class="pipeline-step" data-track="fast">
-                    <span class="step-dot"></span> 📚 极速通道 (80%)
+                    <span class="step-dot"></span> 📚 极速通道 (政策查询)
                 </div>
-                <div class="pipeline-step" data-track="action">
-                    <span class="step-dot"></span> ⚡ 动作通道 (15%)
+                <div class="pipeline-step" data-track="action_query">
+                    <span class="step-dot"></span> 🔍 数据查询 (个人数据)
+                </div>
+                <div class="pipeline-step" data-track="action_create">
+                    <span class="step-dot"></span> ⚡ 动作通道 (工单操作)
                 </div>
                 <div class="pipeline-step" data-track="complex">
-                    <span class="step-dot"></span> 🧩 复杂通道 (5%)
+                    <span class="step-dot"></span> 🧩 复杂通道 (合规申请)
                 </div>
             </div>
         </div>
@@ -861,6 +926,62 @@
     const debugPanel = document.getElementById('debug-panel');
     const debugContent = document.getElementById('debug-content');
     const threadId = 'web_' + Date.now();
+
+    // ============================================================
+    // Identity Management
+    // ============================================================
+    // 每个身份有固定的角色，不可自由切换
+    const IDENTITY_MAP = {
+        '张三': 'employee',
+        '李四': 'employee',
+        '王五': 'employee',
+        '赵六': 'employee',
+        '管理员': 'admin',
+    };
+
+    let currentUser = loadIdentity();
+
+    function loadIdentity() {
+        try {
+            const saved = localStorage.getItem('service_desk_identity');
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                // 确保角色与预设一致
+                parsed.role = IDENTITY_MAP[parsed.user_name] || 'employee';
+                return parsed;
+            }
+        } catch (e) {}
+        return { user_name: '张三', role: 'employee' };
+    }
+
+    function saveIdentity() {
+        localStorage.setItem('service_desk_identity', JSON.stringify(currentUser));
+        updateIdentityUI();
+    }
+
+    function onIdentityChange() {
+        const sel = document.getElementById('identity-select');
+        if (sel) {
+            currentUser.user_name = sel.value;
+            currentUser.role = IDENTITY_MAP[sel.value] || 'employee';
+        }
+        saveIdentity();
+    }
+
+    function updateIdentityUI() {
+        const sel = document.getElementById('identity-select');
+        if (sel) sel.value = currentUser.user_name;
+
+        const badge = document.getElementById('identity-badge-display');
+        if (badge) {
+            const roleLabel = currentUser.role === 'admin' ? '管理员' : '员工';
+            const roleClass = currentUser.role === 'admin' ? 'admin' : 'employee';
+            badge.innerHTML = `<span class="identity-badge ${roleClass}">${currentUser.user_name} · ${roleLabel}</span>`;
+        }
+    }
+
+    // Initialize identity UI on load
+    updateIdentityUI();
     let currentBotBubble = null;
     let currentOrchBlock = null;
     let currentOrchSteps = null;
@@ -1190,7 +1311,12 @@
             fetch('/chat/reset-card', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({message: '', thread_id: threadId}),
+                body: JSON.stringify({
+                    message: '',
+                    thread_id: threadId,
+                    user_name: currentUser.user_name,
+                    role: currentUser.role,
+                }),
             }).catch(() => {});
             wrapper.innerHTML = '<div class="card-fallback"><span style="color:var(--text-secondary);">' +
                 (dismissText === '问题已解决' ? '✅ 问题已解决，无需创建工单' : '已取消') +
@@ -1334,7 +1460,12 @@
             const res = await fetch('/chat/stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: input, thread_id: threadId }),
+                body: JSON.stringify({
+                    message: input,
+                    thread_id: threadId,
+                    user_name: currentUser.user_name,
+                    role: currentUser.role,
+                }),
             });
 
             const reader = res.body.getReader();
@@ -1393,6 +1524,12 @@
                         setPipelineTrack('fast');
                         addOrchStep('classify', trimmed.replace('[FAST]', '').trim());
                         addDebugEntry('event', 'fast_track', '进入极速通道');
+
+                    } else if (trimmed.startsWith('[ACTION_QUERY]')) {
+                        currentTrack = 'action_query';
+                        setPipelineTrack('action_query');
+                        addOrchStep('query', trimmed.replace('[ACTION_QUERY]', '').trim());
+                        addDebugEntry('event', 'action_query_track', '进入数据查询通道');
 
                     } else if (trimmed.startsWith('[ACTION]')) {
                         currentTrack = 'action';

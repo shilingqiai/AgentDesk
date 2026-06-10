@@ -163,6 +163,59 @@ async def ticket_status(ticket_number: str) -> dict:
 # 自动注册
 # ============================================================
 
+# ============================================================
+# 请假余额查询工具（模拟 HR 系统 API）
+# ============================================================
+
+_MOCK_LEAVE_BALANCES = {
+    "张三": {"annual_total": 15, "annual_used": 2, "sick_remaining": 5},
+    "李四": {"annual_total": 10, "annual_used": 9, "sick_remaining": 3},
+    "王五": {"annual_total": 20, "annual_used": 18, "sick_remaining": 2},
+    "赵六": {"annual_total": 15, "annual_used": 0, "sick_remaining": 5},
+}
+
+
+@tool_registry.register(
+    name="leave_balance_query",
+    description="查询员工年假和病假余额（模拟 HR 系统 API）",
+    parameters={
+        "employee_name": {"type": "string", "description": "员工姓名，如'张三'", "required": True},
+    },
+    category="internal",
+)
+async def leave_balance_query(employee_name: str) -> dict:
+    """查询员工假期余额（模拟 HR 系统调用）"""
+    employee_name = employee_name.strip()
+
+    # 精确匹配或模糊匹配
+    data = _MOCK_LEAVE_BALANCES.get(employee_name)
+    if not data:
+        for name in _MOCK_LEAVE_BALANCES:
+            if employee_name in name or name in employee_name:
+                data = _MOCK_LEAVE_BALANCES[name]
+                employee_name = name
+                break
+
+    if not data:
+        return {
+            "employee_name": employee_name,
+            "annual_leave_total": 10,
+            "annual_leave_used": 3,
+            "annual_leave_remaining": 7,
+            "sick_leave_remaining": 5,
+            "note": f"（{employee_name} 余额数据为默认模拟值，请确认）",
+        }
+
+    return {
+        "employee_name": employee_name,
+        "annual_leave_total": data["annual_total"],
+        "annual_leave_used": data["annual_used"],
+        "annual_leave_remaining": data["annual_total"] - data["annual_used"],
+        "sick_leave_remaining": data["sick_remaining"],
+        "query_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+
+
 def _register_all():
     """确保所有工具已导入并注册"""
     pass  # 模块加载时 @tool_registry.register 装饰器已自动注册

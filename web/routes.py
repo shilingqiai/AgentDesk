@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +29,38 @@ def render_template(name: str, context: dict = None) -> HTMLResponse:
 
 router = APIRouter(tags=["Web界面"])
 
+
+# ============================================================
+# 身份注入中间件 — 从 Header 解析当前用户
+# ============================================================
+
+class IdentityMiddleware(BaseHTTPMiddleware):
+    """
+    从 HTTP Header 注入用户身份到 request.state。
+
+    企业内网环境下，反向代理（Nginx/网关）在 X-User-Name 中注入当前用户。
+    本地开发 / Demo 模式下，前端通过 ChatRequest body 直接传递身份。
+
+    优先级：Header > Body > 默认值（匿名用户）
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # 从 header 读取（企业网关注入）
+        user_name = request.headers.get("X-User-Name", "")
+        role = request.headers.get("X-User-Role", "employee")
+
+        # 存入 request.state 供下游使用
+        request.state.user_name = user_name
+        request.state.role = role
+
+        response = await call_next(request)
+        return response
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "web"
+    user_name: str = ""
+    role: str = "employee"  # "employee" | "admin"
 
 # ============================================================
 # 页面路由
@@ -73,24 +103,37 @@ async def meeting_rooms_page(request: Request):
 # ============================================================
 
 @router.post("/chat/stream", summary="多Agent编排流式聊天")
-async def chat_stream_endpoint(chat: ChatRequest):
+async def chat_stream_endpoint(chat: ChatRequest, request: Request):
     from agents.graph_workflow import orchestration_runner
+
+    # 身份来源：Header 注入 > Body 传递 > 默认值
+    user_name = request.state.user_name or chat.user_name or "anonymous"
+    role = request.state.role or chat.role or "employee"
 
     async def token_generator():
         async for token in orchestration_runner.run_stream(
-            chat.message, thread_id=chat.thread_id,
+            chat.message,
+            thread_id=chat.thread_id,
+            user_name=user_name,
+            role=role,
         ):
             yield token
 
     return StreamingResponse(token_generator(), media_type="text/plain")
 
 @router.post("/chat", summary="兼容性聊天接口")
-async def chat_endpoint(chat: ChatRequest):
+async def chat_endpoint(chat: ChatRequest, request: Request):
     from agents.graph_workflow import orchestration_runner
+
+    user_name = request.state.user_name or chat.user_name or "anonymous"
+    role = request.state.role or chat.role or "employee"
 
     async def token_generator():
         async for token in orchestration_runner.run_stream(
-            chat.message, thread_id=chat.thread_id,
+            chat.message,
+            thread_id=chat.thread_id,
+            user_name=user_name,
+            role=role,
         ):
             yield token
 
@@ -125,3 +168,12 @@ async def reset_card_state(chat: ChatRequest):
 async def list_registered_agents():
     from agents.orchestrator.agent_registry import agent_registry
     return agent_registry.list_agents()
+
+
+@router.get("/api/identity", summary="获取当前用户身份")
+async def get_identity(request: Request):
+    """返回当前 request 中解析到的用户身份（来自 Header 或默认值）"""
+    return {
+        "user_name": getattr(request.state, "user_name", ""),
+        "role": getattr(request.state, "role", "employee"),
+    }

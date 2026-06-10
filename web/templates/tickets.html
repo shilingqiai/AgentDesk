@@ -46,6 +46,45 @@
         }
         .sidebar-title { font-size: 16px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
         .sidebar-title i { color: var(--accent-light); }
+
+        /* Identity Selector */
+        .identity-selector {
+            margin-top: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .identity-selector label {
+            font-size: 11px;
+            color: var(--text-sidebar-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+        .identity-selector select {
+            width: 100%;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.06);
+            color: #fff;
+            font-size: 13px;
+            font-family: inherit;
+            outline: none;
+            cursor: pointer;
+        }
+        .identity-selector select:focus { border-color: var(--accent); }
+        .identity-selector select option { background: #1a1a2e; color: #fff; }
+        .identity-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .identity-badge.employee { background: rgba(0,184,148,0.15); color: #55efc4; }
+        .identity-badge.admin { background: rgba(253,203,110,0.15); color: #fdcb6e; }
         .nav-links { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); }
         .nav-links a {
             display: block; color: var(--text-sidebar-muted); text-decoration: none;
@@ -198,6 +237,17 @@
 <aside class="sidebar">
     <div class="sidebar-header">
         <div class="sidebar-title"><i class="fas fa-clipboard-list"></i> 工单管理</div>
+        <div class="identity-selector">
+            <label><i class="fas fa-user-circle"></i> 当前身份</label>
+            <select id="identity-select" onchange="onIdentityChange()">
+                <option value="张三">👤 张三 (员工)</option>
+                <option value="李四">👤 李四 (员工)</option>
+                <option value="王五">👤 王五 (员工)</option>
+                <option value="赵六">👤 赵六 (员工)</option>
+                <option value="管理员">🔸 管理员</option>
+            </select>
+            <div style="margin-top:4px;" id="identity-badge-display"></div>
+        </div>
     </div>
     <div class="nav-links">
         <a href="/"><i class="fas fa-comments"></i> 智能服务台</a>
@@ -337,18 +387,35 @@
                     </div>
 
                     <div class="detail-actions">
+                        <!-- Admin: approve/reject for leave tickets -->
+                        <button class="btn success sm" @click.stop="approveTicket(ticket.id)"
+                                x-show="isAdmin && ticket.ticket_type === 'leave'
+                                        && ticket.status !== 'resolved' && ticket.status !== 'closed'">
+                            ✅ 审批通过
+                        </button>
+                        <button class="btn sm" @click.stop="rejectTicket(ticket.id)"
+                                style="background:var(--danger);color:#fff;border-color:var(--danger);"
+                                x-show="isAdmin && ticket.ticket_type === 'leave'
+                                        && ticket.status !== 'resolved' && ticket.status !== 'closed'">
+                            ❌ 驳回
+                        </button>
+                        <!-- Admin: general status management -->
                         <button class="btn success sm" @click.stop="updateStatus(ticket.id, 'resolved')"
-                                x-show="ticket.status !== 'resolved' && ticket.status !== 'closed'">
+                                x-show="isAdmin && ticket.status !== 'resolved' && ticket.status !== 'closed'">
                             ✅ 标记已解决
                         </button>
                         <button class="btn sm" @click.stop="updateStatus(ticket.id, 'closed')"
-                                x-show="ticket.status !== 'closed'">
+                                x-show="isAdmin && ticket.status !== 'closed'">
                             🔒 关闭工单
                         </button>
                         <button class="btn sm" @click.stop="updateStatus(ticket.id, 'processing')"
-                                x-show="ticket.status === 'created' || ticket.status === 'assigned'">
+                                x-show="isAdmin && (ticket.status === 'created' || ticket.status === 'assigned')">
                             🔄 开始处理
                         </button>
+                        <!-- Employee: read-only note -->
+                        <span x-show="!isAdmin" style="font-size:12px;color:var(--text-secondary);">
+                            💡 工单状态变更请联系管理员
+                        </span>
                     </div>
                 </div>
             </div>
@@ -398,6 +465,10 @@ function ticketsApp() {
         filters: { type: '', status: '', priority: '' },
         toast: { show: false, message: '', type: 'success' },
 
+        // Identity
+        currentUser: loadIdentity(),
+        get isAdmin() { return this.currentUser.role === 'admin'; },
+
         TYPE_CONFIG: {
             it_fault: { label: 'IT故障', icon: 'fa-network-wired' },
             leave: { label: '请假', icon: 'fa-umbrella-beach' },
@@ -410,6 +481,7 @@ function ticketsApp() {
         },
 
         async init() {
+            updateIdentityUI();
             await this.loadStats();
             await this.loadTickets();
         },
@@ -441,6 +513,12 @@ function ticketsApp() {
                 if (this.filters.priority) params.set('priority', this.filters.priority);
                 params.set('limit', String(this.pageSize));
                 params.set('offset', String((this.currentPage - 1) * this.pageSize));
+                // 身份注入：员工只看自己的工单
+                params.set('user_name', this.currentUser.user_name);
+                params.set('role', this.currentUser.role);
+                if (this.currentUser.role !== 'admin') {
+                    params.set('requester_id', this.currentUser.user_name);
+                }
 
                 const res = await fetch(`/api/tickets/?${params.toString()}`);
                 const data = await res.json();
@@ -466,7 +544,10 @@ function ticketsApp() {
 
         async updateStatus(ticketId, newStatus) {
             try {
-                const res = await fetch(`/api/tickets/${ticketId}/status`, {
+                const params = new URLSearchParams();
+                params.set('user_name', this.currentUser.user_name);
+                params.set('role', this.currentUser.role);
+                const res = await fetch(`/api/tickets/${ticketId}/status?${params.toString()}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ status: newStatus }),
@@ -481,6 +562,52 @@ function ticketsApp() {
                 }
             } catch (e) {
                 this.showToast('更新请求失败', 'error');
+            }
+        },
+
+        async approveTicket(ticketId) {
+            try {
+                const params = new URLSearchParams();
+                params.set('user_name', this.currentUser.user_name);
+                params.set('role', this.currentUser.role);
+                const res = await fetch(`/api/tickets/${ticketId}/approve?${params.toString()}`, {
+                    method: 'POST',
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    this.showToast(data.message || '审批通过', 'success');
+                    await this.loadTickets();
+                    await this.loadStats();
+                } else {
+                    const err = await res.json();
+                    this.showToast(err.detail || '审批失败', 'error');
+                }
+            } catch (e) {
+                this.showToast('审批请求失败', 'error');
+            }
+        },
+
+        async rejectTicket(ticketId) {
+            const reason = prompt('请输入驳回理由（可选）：');
+            try {
+                const params = new URLSearchParams();
+                params.set('user_name', this.currentUser.user_name);
+                params.set('role', this.currentUser.role);
+                if (reason) params.set('reason', reason);
+                const res = await fetch(`/api/tickets/${ticketId}/reject?${params.toString()}`, {
+                    method: 'POST',
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    this.showToast(data.message || '已驳回', 'success');
+                    await this.loadTickets();
+                    await this.loadStats();
+                } else {
+                    const err = await res.json();
+                    this.showToast(err.detail || '驳回失败', 'error');
+                }
+            } catch (e) {
+                this.showToast('驳回请求失败', 'error');
             }
         },
 
@@ -521,6 +648,73 @@ function ticketsApp() {
             this.toast = { show: true, message, type };
         },
     };
+}
+
+// ============================================================
+// Identity Management (global — shared by inline event handlers)
+// ============================================================
+// 每个身份有固定的角色，不可自由切换
+const IDENTITY_MAP = {
+    '张三': 'employee',
+    '李四': 'employee',
+    '王五': 'employee',
+    '赵六': 'employee',
+    '管理员': 'admin',
+};
+
+function loadIdentity() {
+    try {
+        const saved = localStorage.getItem('service_desk_identity');
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            // 确保角色与预设一致（防止 localStorage 被篡改）
+            parsed.role = IDENTITY_MAP[parsed.user_name] || 'employee';
+            return parsed;
+        }
+    } catch (e) {}
+    return { user_name: '张三', role: 'employee' };
+}
+
+function saveIdentity() {
+    const sel = document.getElementById('identity-select');
+    const identity = {
+        user_name: sel ? sel.value : '张三',
+        role: IDENTITY_MAP[sel ? sel.value : '张三'] || 'employee',
+    };
+    localStorage.setItem('service_desk_identity', JSON.stringify(identity));
+    updateIdentityUI();
+    // 同步到 Alpine 组件
+    const appEl = document.querySelector('[x-data]');
+    if (appEl && appEl.__x) {
+        const data = appEl.__x.$data;
+        if (data) data.currentUser = identity;
+    }
+}
+
+function onIdentityChange() {
+    saveIdentity();
+    // 刷新工单列表
+    const appEl = document.querySelector('[x-data]');
+    if (appEl && appEl.__x) {
+        const data = appEl.__x.$data;
+        if (data && data.loadTickets) {
+            data.loadTickets();
+            data.loadStats();
+        }
+    }
+}
+
+function updateIdentityUI() {
+    const identity = loadIdentity();
+    const sel = document.getElementById('identity-select');
+    if (sel) sel.value = identity.user_name;
+
+    const badge = document.getElementById('identity-badge-display');
+    if (badge) {
+        const roleLabel = identity.role === 'admin' ? '管理员' : '员工';
+        const roleClass = identity.role === 'admin' ? 'admin' : 'employee';
+        badge.innerHTML = `<span class="identity-badge ${roleClass}">${identity.user_name} · ${roleLabel}</span>`;
+    }
 }
 </script>
 </body>

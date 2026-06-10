@@ -33,6 +33,7 @@ v4 改进：
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import TypedDict, Literal, Annotated, Optional, AsyncGenerator
 from langgraph.graph import StateGraph, END
@@ -69,9 +70,16 @@ class TicketState(TypedDict):
     conversation_phase: str   # "initial" | "self_help_provided"
     last_rag_topic: str       # 上一轮 RAG 回答的主题（如 "VPN故障排查"）
     last_rag_summary: str     # 上一轮 RAG 回答的核心内容（100字摘要）
+    # v5: 用户身份
+    user_name: str            # 当前用户姓名（如 "张三"）
+    role: str                 # 角色: "employee" | "admin"
+    # v6: 并行节点结果隔离（防 Race Condition）
+    parallel_rag_result: dict     # RAG 查询结果（complex track 并行）
+    parallel_tool_result: dict    # ToolAgent 查询结果（complex track 并行）
 
 
-def create_initial_state(user_input: str, thread_id: str = "default") -> TicketState:
+def create_initial_state(user_input: str, thread_id: str = "default",
+                        user_name: str = "", role: str = "employee") -> TicketState:
     return TicketState(
         messages=[HumanMessage(content=user_input)],
         track="", agent_id="", intent="", urgency="medium",
@@ -80,6 +88,8 @@ def create_initial_state(user_input: str, thread_id: str = "default") -> TicketS
         final_response="", resolved=False, thread_id=thread_id,
         pending_card_type="", re_route=False,
         conversation_phase="initial", last_rag_topic="", last_rag_summary="",
+        user_name=user_name, role=role,
+        parallel_rag_result={}, parallel_tool_result={},
     )
 
 
@@ -138,8 +148,8 @@ async def route_node(state: TicketState) -> TicketState:
     # ── 短路 1: 卡片锁 ──
     pending = state.get("pending_card_type", "")
     if pending:
-        logger.info(f"[Route] 卡片锁 pending_card={pending}，短路 Router → action")
-        state["track"] = "action"
+        logger.info(f"[Route] 卡片锁 pending_card={pending}，短路 Router → action_create")
+        state["track"] = "action_create"
         state["agent_id"] = "ticket_dispatch"
         state["confidence"] = 1.0
         state["intent"] = pending
@@ -181,7 +191,9 @@ async def route_node(state: TicketState) -> TicketState:
     from agents.orchestrator.control_layers import control_manager
 
     action_type = "query"
-    if result.track == "action":
+    if result.track == "action_query":
+        action_type = "query"
+    elif result.track == "action_create":
         action_type = "create_ticket"
     elif result.track == "complex":
         action_type = "multi_step"
@@ -270,8 +282,8 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
         }
 
         if intent == "escalation":
-            # 强制走 action_track 创建工单
-            state["track"] = "action"
+            # 强制走 action_create 创建工单
+            state["track"] = "action_create"
             state["agent_id"] = "ticket_dispatch"
             state["intent"] = "ticket_request"
             state["urgency"] = "high"
@@ -304,7 +316,7 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
 
     except Exception as e:
         logger.error(f"[ReEvaluate] LLM 调用失败: {e}，兜底为 escalation")
-        state["track"] = "action"
+        state["track"] = "action_create"
         state["agent_id"] = "ticket_dispatch"
         state["intent"] = "ticket_request"
         state["urgency"] = "high"
@@ -477,8 +489,52 @@ async def action_track_node(state: TicketState) -> TicketState:
         return state
 
     # ================================================================
-    # 非锁模式：创建新工单 / 返回新卡片 / escalation 升级
+    # 非锁模式：action_query → ToolAgent | action_create → TicketDispatch
     # ================================================================
+
+    track = state.get("track", "action_create")
+
+    # ── action_query: 纯数据查询 → ToolAgent ──
+    if track == "action_query":
+        from agents.sub_agents.tool_agent import ToolAgent
+
+        tool_agent = ToolAgent()
+        tool_msg = AM.create_delegation(
+            from_agent="orchestrator", to_agent="tool_agent",
+            payload={
+                "user_input": user_text,
+                "task": f"查询用户 {state.get('user_name', '')} 的请求数据",
+                "intent_category": "action_query",
+                "user_name": state.get("user_name", ""),
+            },
+            trace_id=state.get("thread_id", ""),
+        )
+
+        try:
+            result = await tool_agent.execute(tool_msg)
+            message_bus.record(result)
+            state["agent_results"]["tool_agent"] = {
+                "success": result.success, "payload": result.payload, "error": result.error,
+            }
+
+            if result.success and result.payload.get("direct_response"):
+                state["final_response"] = result.payload["direct_response"]
+            elif result.error:
+                state["final_response"] = (
+                    f"查询未能完成：{result.error}\n\n"
+                    "请稍后重试，或拨打服务台热线获取人工支持。"
+                )
+            else:
+                state["final_response"] = "查询完成，如需进一步操作请告诉我。"
+        except Exception as e:
+            logger.error(f"[ActionTrack:query] ToolAgent 执行失败: {e}")
+            state["final_response"] = "抱歉，查询数据时出现了问题。请稍后重试或联系服务台。"
+
+        state["resolved"] = True
+        state["re_route"] = False
+        return state
+
+    # ── action_create: 创建工单 / escalation 升级 → TicketDispatch ──
 
     # v4: 如果是 escalation 路径（re_evaluate → action），生成升级上下文
     escalation_context = ""
@@ -500,6 +556,9 @@ async def action_track_node(state: TicketState) -> TicketState:
             "task": "提取参数并创建工单",
             "intent_category": "action",
             "urgency": state.get("urgency", "medium"),
+            "user_id": state.get("user_name", ""),
+            "user_name": state.get("user_name", ""),
+            "role": state.get("role", "employee"),
         },
         trace_id=state.get("thread_id", ""),
     )
@@ -552,7 +611,13 @@ async def action_track_node(state: TicketState) -> TicketState:
 
 
 async def complex_track_node(state: TicketState) -> TicketState:
-    """复杂通道 (5%)：Plan → 多Agent委派 → Synthesize"""
+    """
+    复杂通道 (5%)：Plan → 多Agent委派 → Synthesize
+
+    v6: 对请假/报销场景实现并行编排（RAG ∥ ToolAgent → TicketDispatch），
+    其他场景走串行 TaskPlanner 路径。
+    并行结果通过 Python 变量传递（不写 LangGraph State），避免 Race Condition。
+    """
     from agents.orchestrator.task_planner import TaskPlanner
     from agents.orchestrator.agent_registry import agent_registry
     from agents.orchestrator.response_synthesizer import ResponseSynthesizer
@@ -563,7 +628,192 @@ async def complex_track_node(state: TicketState) -> TicketState:
 
     user_text = _get_user_text(state)
     conversation_history = _build_conversation_context(state["messages"])
+    user_name = state.get("user_name", "")
     llm = create_chat_model(model_type="main", temperature=0)
+
+    # ================================================================
+    # v6: 请假/报销 → 并行 DAG 模式
+    # ================================================================
+    # v6.1 正则匹配 "请X天假" "休假" 等模式（防"请4天假"被"请假"子串遗漏）
+    import re as _re
+    _leave_pattern = _re.compile(r'请.*?假|休.*?假|年假|病假|事假|调休|婚假|产假|天假')
+    is_leave = bool(_leave_pattern.search(user_text))
+    expense_keywords = ["报销", "差旅", "费用"]
+    is_expense = any(kw in user_text for kw in expense_keywords)
+
+    if is_leave or is_expense:
+        logger.info(
+            f"[ComplexTrack:v6] 检测到 {'请假' if is_leave else '报销'}请求，"
+            f"启用并行 DAG 模式"
+        )
+
+        try:
+            # ── Step 1+2: 并行 RAG查政策 + ToolAgent查余额 ──
+            rag_agent = agent_registry.get_agent("enterprise_rag")
+            tool_agent = agent_registry.get_agent("tool_agent")
+            ticket_agent = agent_registry.get_agent("ticket_dispatch")
+
+            if not rag_agent or not tool_agent or not ticket_agent:
+                logger.error("[ComplexTrack:v6] Agent 未就绪，降级为串行")
+                state["final_response"] = "系统初始化未完成，请稍后重试。"
+                state["resolved"] = True
+                return state
+
+            await rag_agent._ensure_initialized()
+
+            async def _rag_policy():
+                """并行任务 A: 查询政策"""
+                docs = await rag_agent.knowledge_service.search(user_text, top_k=3)
+                if docs:
+                    doc_context = rag_agent._build_doc_context(docs)
+                    policy_text = await rag_agent._synthesize(
+                        user_text, docs, conversation_history,
+                    )
+                    return {
+                        "success": True,
+                        "policy_text": policy_text,
+                        "sources": [
+                            {"category": d.get("category", ""), "score": d.get("score", 0)}
+                            for d in docs
+                        ],
+                    }
+                return {"success": True, "policy_text": "", "sources": []}
+
+            async def _tool_balance():
+                """并行任务 B: 查询员工余额"""
+                from agents.sub_agents.tool_agent import ToolAgent
+                ta = ToolAgent()
+                msg = AM.create_delegation(
+                    from_agent="orchestrator", to_agent="tool_agent",
+                    payload={
+                        "user_input": f"查询员工 {user_name} 的{'年假' if is_leave else '相关'}余额",
+                        "task": f"查询 {user_name} 的余额数据",
+                    },
+                )
+                result = await ta.execute(msg)
+                if result.success:
+                    return {
+                        "success": True,
+                        "tool_result": result.payload.get("tool_result", {}),
+                        "direct_response": result.payload.get("direct_response", ""),
+                    }
+                return {"success": False, "error": result.error}
+
+            # 并行执行（Python 变量传递，不写 LangGraph State）
+            policy_result, balance_result = await asyncio.gather(
+                _rag_policy(), _tool_balance(),
+            )
+
+            logger.info(
+                f"[ComplexTrack:v6] 并行完成 — "
+                f"policy={policy_result['success']}, balance={balance_result['success']}"
+            )
+
+            # 存入 state（并行完成后安全写入）
+            state["parallel_rag_result"] = policy_result
+            state["parallel_tool_result"] = balance_result
+
+            # ── Step 3: TicketDispatch 合规检查 + 生成卡片 ──
+            policy_text = policy_result.get("policy_text", "")
+            balance_data = balance_result.get("tool_result", {})
+            balance_text = balance_result.get("direct_response", "")
+
+            compliance_input = (
+                f"{user_text}\n\n"
+                f"[系统预查询结果]\n"
+                f"政策信息：{policy_text[:500] if policy_text else '未查到相关政策'}\n"
+                f"员工余额：{balance_text if balance_text else '未查到余额数据'}\n"
+                f"余额数据(JSON)：{json.dumps(balance_data, ensure_ascii=False) if balance_data else '无'}"
+            )
+
+            ticket_msg = AM.create_delegation(
+                from_agent="orchestrator", to_agent="ticket_dispatch",
+                payload={
+                    "user_input": compliance_input,
+                    "task": "合规检查并生成确认卡片",
+                    "intent_category": "complex",
+                    "urgency": state.get("urgency", "medium"),
+                    "user_id": user_name,
+                    "user_name": user_name,
+                    "role": state.get("role", "employee"),
+                    "pre_checked": True,
+                    "policy_result": policy_result,
+                    "balance_result": balance_result,
+                },
+                trace_id=state.get("thread_id", ""),
+            )
+
+            result = await ticket_agent.execute(ticket_msg)
+            message_bus.record(result)
+
+            state["agent_results"] = {
+                "enterprise_rag": {"success": policy_result["success"],
+                                   "payload": policy_result, "error": None},
+                "tool_agent": {"success": balance_result["success"],
+                               "payload": balance_result, "error": None},
+                "ticket_dispatch": {"success": result.success,
+                                    "payload": result.payload, "error": result.error},
+            }
+
+            if result.success and result.payload.get("return_card"):
+                import json as _json
+                card = result.payload.get("card", {})
+                ticket_type = result.payload.get("ticket_type", "leave" if is_leave else "expense")
+                state["final_response"] = (
+                    "📋 **请确认以下信息**\n\n"
+                    + card.get("description", "")
+                    + "\n[CARD]" + _json.dumps(card, ensure_ascii=False)
+                )
+                state["agent_results"]["ticket_dispatch"]["card"] = card
+                state["pending_card_type"] = ticket_type
+                logger.info(f"[ComplexTrack:v6] 设置卡片锁 pending_card_type={ticket_type}")
+            elif result.success and result.payload.get("direct_response"):
+                state["final_response"] = result.payload["direct_response"]
+            elif result.error:
+                state["final_response"] = (
+                    f"合规检查未能完成：{result.error}\n\n"
+                    "请稍后重试，或拨打服务台热线获取人工支持。"
+                )
+            else:
+                state["final_response"] = "申请已提交，如需查看详情请稍后查询。"
+
+        except Exception as e:
+            logger.error(f"[ComplexTrack:v6] 并行 DAG 执行失败: {e}，降级为串行")
+            # 降级：直接走 TicketDispatch
+            ticket_agent = agent_registry.get_agent("ticket_dispatch")
+            if ticket_agent:
+                try:
+                    fallback_msg = AM.create_delegation(
+                        from_agent="orchestrator", to_agent="ticket_dispatch",
+                        payload={
+                            "user_input": user_text,
+                            "task": "提取参数并创建工单",
+                            "intent_category": "complex",
+                            "urgency": state.get("urgency", "medium"),
+                            "user_id": user_name,
+                            "user_name": user_name,
+                            "role": state.get("role", "employee"),
+                        },
+                        trace_id=state.get("thread_id", ""),
+                    )
+                    result = await ticket_agent.execute(fallback_msg)
+                    state["agent_results"]["ticket_dispatch"] = {
+                        "success": result.success, "payload": result.payload, "error": result.error,
+                    }
+                    state["final_response"] = (
+                        result.payload.get("direct_response", "申请已提交。")
+                        if result.success
+                        else f"操作失败：{result.error}"
+                    )
+                except Exception as e2:
+                    state["final_response"] = f"申请处理失败：{e2}"
+
+        state["resolved"] = True
+        return state
+
+    # ================================================================
+    # 非请假/报销场景：串行 TaskPlanner 路径（原有逻辑）
+    # ================================================================
 
     intent_result = RouteResult(track="complex", reason=user_text[:100])
     planner = TaskPlanner(llm, agent_registry)
@@ -621,9 +871,24 @@ async def complex_track_node(state: TicketState) -> TicketState:
             error=rdict.get("error"),
         )
 
-    synthesizer = ResponseSynthesizer(llm)
-    response = await synthesizer.synthesize(agent_msgs, user_text)
-    state["final_response"] = response
+    # v6.1: 检测 TicketDispatch 是否返回了确认卡片
+    td_result = agent_results.get("ticket_dispatch", {})
+    if td_result.get("success") and td_result.get("payload", {}).get("return_card"):
+        import json as _json
+        card = td_result["payload"].get("card", {})
+        ticket_type = td_result["payload"].get("ticket_type", "")
+        state["final_response"] = (
+            "📋 **请确认以下信息**\n\n"
+            + card.get("description", "")
+            + "\n[CARD]" + _json.dumps(card, ensure_ascii=False)
+        )
+        state["agent_results"]["ticket_dispatch"]["card"] = card
+        state["pending_card_type"] = ticket_type
+        logger.info(f"[ComplexTrack:serial] 设置卡片锁 pending_card_type={ticket_type}")
+    else:
+        synthesizer = ResponseSynthesizer(llm)
+        response = await synthesizer.synthesize(agent_msgs, user_text)
+        state["final_response"] = response
     state["resolved"] = True
     return state
 
@@ -681,7 +946,7 @@ async def respond_node(state: TicketState) -> TicketState:
     if not state.get("final_response"):
         state["final_response"] = "处理完成，如有疑问请咨询服务台。"
 
-    if state.get("needs_human_review") and state.get("track") == "action":
+    if state.get("needs_human_review") and state.get("track") == "action_create":
         state["final_response"] = (
             "⚠️ 此操作需要人工审核确认。\n\n"
             f"{state['final_response']}\n\n"
@@ -700,13 +965,14 @@ async def respond_node(state: TicketState) -> TicketState:
 def route_after_route(state: TicketState) -> Literal[
     "re_evaluate", "fast_track", "action_track", "complex_track", "clarification",
 ]:
-    """路由分发 — v4 增加 re_evaluate 分支"""
+    """路由分发 — v6 增加 action_query / action_create 分支"""
     track = state.get("track", "clarification")
-    if track == "re_evaluate": return "re_evaluate"
-    if track == "fast":        return "fast_track"
-    elif track == "action":    return "action_track"
-    elif track == "complex":   return "complex_track"
-    else:                      return "clarification"
+    if track == "re_evaluate":     return "re_evaluate"
+    if track == "fast":            return "fast_track"
+    elif track == "action_query":  return "action_track"
+    elif track == "action_create": return "action_track"
+    elif track == "complex":       return "complex_track"
+    else:                          return "clarification"
 
 
 def after_re_evaluate(state: TicketState) -> Literal[
@@ -800,17 +1066,22 @@ def _yield_stream_event(node_name: str, node_state: dict):
     elif node_name == "fast_track":
         yield "[FAST] 📚 企业知识库检索 · EnterpriseRAG\n"
     elif node_name == "action_track":
-        yield "[ACTION] ⚡ 动作通道 · 工单派发\n"
+        track = node_state.get("track", "action_create")
+        if track == "action_query":
+            yield "[ACTION_QUERY] 🔍 数据查询 · ToolAgent\n"
+        else:
+            yield "[ACTION] ⚡ 动作通道 · 工单派发\n"
     elif node_name == "complex_track":
         yield "[COMPLEX] 🧩 复杂通道 · 多步骤编排\n"
     elif node_name == "clarification":
         yield "[CLARIFY] 🤔 AI 需要确认您的意图\n"
     elif node_name == "route":
         track = node_state.get("track", "")
-        if track and track not in ("action", "re_evaluate"):
+        if track and track not in ("action_create", "action_query", "re_evaluate"):
             track_names = {
                 "fast": "🔍 极速通道 · 企业知识库问答",
-                "action": "⚡ 动作通道 · 工单派发",
+                "action_query": "🔍 个人数据查询 · ToolAgent",
+                "action_create": "⚡ 动作通道 · 工单派发",
                 "complex": "🧩 复杂通道 · 多步骤编排",
             }
             yield f"[ROUTE] {track_names.get(track, track)}\n"
@@ -868,6 +1139,8 @@ class OrchestrationWorkflowRunner:
         try:
             import agents.sub_agents.enterprise_rag     # noqa: F401
             import agents.sub_agents.ticket_dispatch    # noqa: F401
+            import agents.sub_agents.tool_agent         # noqa: F401
+            import agents.tools.builtin_tools           # noqa: F401  工具注册
         except ImportError as e:
             logger.warning(f"Agent 模块加载警告: {e}")
 
@@ -878,6 +1151,7 @@ class OrchestrationWorkflowRunner:
 
     async def run_stream(
         self, user_input: str, thread_id: str = "default",
+        user_name: str = "", role: str = "employee",
     ) -> AsyncGenerator[str, None]:
         """
         流式运行编排工作流。
@@ -897,10 +1171,11 @@ class OrchestrationWorkflowRunner:
           [CARD]<JSON>                 — 确认卡片
           [DONE]                       — 完成
         """
-        initial_state = create_initial_state(user_input, thread_id)
+        initial_state = create_initial_state(user_input, thread_id,
+                                            user_name=user_name, role=role)
         config = {"configurable": {"thread_id": thread_id}}
 
-        # ── 从 checkpointer 恢复 v4 对话阶段状态 ──
+        # ── 从 checkpointer 恢复 v4/v5 对话阶段状态 + 身份 ──
         # messages 由 LangGraph add_messages reducer 自动合并，无需手动处理。
         # 但 conversation_phase 等普通字段会被 initial_state 覆盖，需手动恢复。
         prev = self.app.get_state(config)
@@ -923,10 +1198,15 @@ class OrchestrationWorkflowRunner:
                 if prev_agent_results:
                     initial_state["agent_results"] = prev_agent_results
 
+            # v5: 继承用户身份（新请求未带身份时用上一次的）
+            if not initial_state["user_name"] and prev.values.get("user_name"):
+                initial_state["user_name"] = prev.values["user_name"]
+                initial_state["role"] = prev.values.get("role", "employee")
+
         if pending_card:
             # 跳过 Router，直送 action_track 让 Agent 分类意图
             initial_state["pending_card_type"] = pending_card
-            initial_state["track"] = "action"
+            initial_state["track"] = "action_create"
 
             yield f"[ROUTE] 📋 处理您对「{pending_card}」卡片的回复\n"
             yield "[THINKING] 🔍 正在理解您的意图...\n"

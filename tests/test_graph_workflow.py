@@ -82,11 +82,18 @@ class TestGraphWorkflow:
         result = route_after_route({"track": "fast"})
         assert result == "fast_track"
 
-    def test_route_after_route_action(self):
-        """路由分发：action 轨道"""
+    def test_route_after_route_action_query(self):
+        """路由分发：action_query 轨道"""
         from agents.graph_workflow import route_after_route
 
-        result = route_after_route({"track": "action"})
+        result = route_after_route({"track": "action_query"})
+        assert result == "action_track"
+
+    def test_route_after_route_action_create(self):
+        """路由分发：action_create 轨道"""
+        from agents.graph_workflow import route_after_route
+
+        result = route_after_route({"track": "action_create"})
         assert result == "action_track"
 
     def test_route_after_route_complex(self):
@@ -170,7 +177,7 @@ class TestRespondNode:
         state = create_initial_state("创建高优工单")
         state["final_response"] = "工单已创建"
         state["needs_human_review"] = True
-        state["track"] = "action"
+        state["track"] = "action_create"
 
         result = await respond_node(state)
 
@@ -249,7 +256,7 @@ class TestCardLocking:
         import asyncio
         result = asyncio.run(route_node(state))
 
-        assert result["track"] == "action"
+        assert result["track"] == "action_create"
         assert result["agent_id"] == "ticket_dispatch"
         assert result["confidence"] == 1.0
         assert result["intent"] == "admin"
@@ -265,7 +272,7 @@ class TestCardLocking:
         import asyncio
         result = asyncio.run(route_node(state))
 
-        assert result["track"] == "action"
+        assert result["track"] == "action_create"
         assert result["confidence"] == 1.0
 
     def test_route_node_no_pending_card_routes_normally(self):
