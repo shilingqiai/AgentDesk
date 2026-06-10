@@ -228,7 +228,7 @@ TICKET_TYPE_CONFIG = {
     "admin": {
         "label": "行政服务",
         "emoji": "🏢",
-        "category_options": ["会议室预定", "快递寄送", "资产领用", "访客登记", "办公环境", "其他"],
+        "category_options": ["会议室预定", "快递寄送", "资产领用", "采购申请", "访客登记", "办公环境", "其他"],
         "response_prefix": "已为您创建行政服务请求",
         "extra_fields": ["service_type", "time_slot", "location", "description"],
     },

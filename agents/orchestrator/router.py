@@ -33,9 +33,16 @@ logger = logging.getLogger("orchestrator.router")
 # ============================================================
 
 class RouterDecision(BaseModel):
-    """Router 输出的结构化决策"""
-    track: Literal["fast", "action_query", "action_create", "complex", "clarify"] = Field(
-        description="路由轨道: fast=查资料, action_query=查个人数据, action_create=办事情, complex=复合指令, clarify=不确定需反问"
+    """
+    Router 输出的结构化决策
+
+    v7: 新增 dynamic 轨道 — 所有需要多工具编排的请求统一走 DynamicActionAgent (ReAct循环)
+        fast → 通用知识查询 (RAG)
+        dynamic → 需要工具编排 (ReAct自由编排，替代旧的 action_query/action_create/complex)
+        clarify → AI不确定时反问
+    """
+    track: Literal["fast", "dynamic", "action_query", "action_create", "complex", "clarify"] = Field(
+        description="路由轨道: fast=知识查询, dynamic=工具编排, action_query/complex=向后兼容, clarify=反问"
     )
     confidence: float = Field(
         description="置信度 0.0-1.0。当 < 0.7 时，编排器会主动反问用户以澄清意图",
@@ -64,14 +71,16 @@ ROUTER_TOOL_SCHEMA = {
             "properties": {
                 "track": {
                     "type": "string",
-                    "enum": ["fast", "action_query", "action_create", "complex", "clarify"],
+                    "enum": ["fast", "dynamic", "action_query", "action_create", "complex", "clarify"],
                     "description": (
-                        "路由轨道 — fast: 知识查询/政策咨询/故障排查/方法问答（如VPN怎么连、请假政策）。"
-                        "但若对话历史显示助手已提供方案且用户说无效（还是不行/没用/无法解决），勿走此轨道；"
-                        "action_query: 纯数据查询，用户只想查看个人数据（如查剩余年假、查工单进度），无意发起申请；"
-                        "action_create: 单步操作，执行不需要合规检查的操作（如创建IT工单、寄快递、简单行政请求）；"
-                        "complex: 发起申请类操作，需要查政策+查余额+合规判断（如请假、报销），无论参数是否完整；"
-                        "clarify: 输入模糊/有歧义/无关话题/AI不确定"
+                        "路由轨道。优先判断：是否能一步回答 ——\n"
+                        "fast: 通用知识/政策/流程查询，不涉及个人信息和实际操作"
+                        "（如'年假政策''VPN怎么排查''食堂在哪'）→ RAG直接回答\n"
+                        "dynamic: 需要多个工具编排的请求，涉及查询+判断+操作组合"
+                        "（如'查库存再建单''查政策再请假''准备入职设备'），"
+                        "让DynamicActionAgent自主决定调用哪些工具和顺序。\n"
+                        "旧轨道(向后兼容): action_query/action_create/complex\n"
+                        "clarify: 输入模糊/AI不确定"
                     ),
                 },
                 "confidence": {
@@ -114,6 +123,7 @@ class RouteResult:
     def from_decision(cls, decision: RouterDecision) -> "RouteResult":
         agent_map = {
             "fast": "enterprise_rag",
+            "dynamic": "dynamic_action",
             "action_query": "tool_agent",
             "action_create": "ticket_dispatch",
             "complex": "",
@@ -183,40 +193,26 @@ class Router:
             "## 重要：多轮对话中的升级信号\n"
             "如果对话历史显示助手已经提供了排障步骤/解决方案，且用户回复表示无效（如'还是不行'"
             "'无法解决''没用''试过了''还是连不上'等），用户意图是「创建工单」而非「再次查询」。"
-            "此时必须走 **action_create** 轨道！！切勿走 fast 重复回答相同内容。\n\n"
-            "## 轨道判定规则（按优先级）\n\n"
-            "### 1. 先判断：是否含「我」或具体人名？\n"
-            "含「我」「我的」「张三」等 → 排除 fast（fast 只能回答通用政策，不能回答个人数据）\n\n"
-            "### 2. 再判断：用户的谓语是什么？\n"
-            "- 谓语是「查/看/还剩/还有/多少」（无意发起申请）→ 纯查询意图\n"
-            "- 谓语是「想/要/帮我/申请/提交/请」（有意发起申请）→ 操作意图\n\n"
-            "### 3. 轨道选择\n\n"
-            "**action_query** — 用户只想「查看/了解」个人数据，无发起申请意图：\n"
-            "  特征：谓语是查/看/还剩/还有，不包含想/要/帮我/申请\n"
-            "  例：'我还有几天年假' '查我的剩余年假' '我的工单进度怎么样'\n"
-            "       '张三的年假还剩多少' '帮我查一下我的余额'\n"
-            "  注：'帮我查'仍是查询意图，不是操作意图\n\n"
-            "**action_create** — 用户要「执行」一个不需要合规检查的操作：\n"
-            "  特征：IT故障报修、简单行政请求、方案无效后的升级\n"
-            "  例：'VPN连不上帮我建工单' '打印机坏了' '帮我寄个快递'\n"
-            "       '还是不行' '试过了没用'（对话历史有排障建议时）\n"
-            "  注意：请假/报销类不属此轨道！即使说'帮我请假'也走 complex\n\n"
-            "**complex** — 用户意图是「发起申请」，需 RAG查政策 + 工具查余额 + 合规判断：\n"
-            "  特征：核心意图是请假/报销申请，无论是否提供完整参数\n"
-            "  例：'我要休年假' '请3天病假' '想报销差旅费' '申请年假'\n"
-            "       '帮我提交请假' '我要报销' '休假' '请假'\n"
-            "  关键：即使只说'我要休假'没写天数 → 仍走 complex（下游Agent做Slot Filling反问）\n"
-            "  关键：即使只说'报销'没写金额 → 仍走 complex\n"
-            "  关键：'帮我请假'虽然含'帮我'，但核心意图是申请，走 complex 不是 action_create\n\n"
-            "**fast** — 用户问的是通用政策/流程/知识（不含个人数据）：\n"
-            "  特征：问规定/流程/方法，不涉及「我」或具体人\n"
-            "  例：'年假政策是什么' '怎么报销' '食堂在哪' 'VPN怎么排查'\n"
-            "  注意：含「我」字的（如'我的年假'）绝对不是 fast！\n"
-            "  注意：如果用户之前刚收到过类似答案却说没用/不行，不要走此轨道\n\n"
-            "**clarify** — 以下情况必须返回 clarify：\n"
-            "  1. 输入过于模糊，无法判断意图（仅'你好''在吗'等寒暄）\n"
-            "  2. 与IT/HR/工单/企业服务完全无关\n"
-            "  3. AI不确定答案时，宁可反问也不要猜测"
+            "此时必须走 **dynamic** 轨道（让 DynamicActionAgent 自动升级为工单）。\n\n"
+            "## 轨道判定（按优先级）\n\n"
+            "### 第一步：是否只需回答通用知识？\n"
+            "**fast** — 用户问通用政策/流程/方法，不涉及个人数据、不需要执行操作：\n"
+            "  例：'年假政策是什么' 'VPN怎么排查' '食堂在哪' '入职需要什么设备'\n"
+            "  特征：纯问答，不需要查数据库、不需要创建工单\n"
+            "  反例：含「帮我」「我要」等操作词的不是 fast\n"
+            "  反例：含「我」「张三」等个人指代的不是 fast\n\n"
+            "### 第二步：否则走 dynamic\n"
+            "**dynamic** — 用户意图涉及以下任一场景时走此轨道：\n"
+            "  - 需要查询数据+根据结果做判断（查库存→领用/采购、查余额→请假）\n"
+            "  - 需要多个工具编排（搜知识库+查库存+建工单）\n"
+            "  - 请假/报销（即使参数不完整 — Agent 会做 Slot Filling）\n"
+            "  - 创建工单、设备领用、采购申请、IT故障报告\n"
+            "  - 会议室预定\n"
+            "  - 方案无效后的升级（'还是不行'→自动建工单）\n"
+            "  DynamicActionAgent 拥有全部工具能力，会自主决定调用哪些工具、什么顺序、何时确认。\n\n"
+            "### 第三步：不确定时 clarify\n"
+            "**clarify** — 输入极其模糊或完全不相关时反问。"
+            "宁可反问也不走错轨道。"
         )
 
     # ── JSON 提取 fallback ──────────────────────────────
@@ -303,7 +299,7 @@ class Router:
                     requires_tools=args.get("requires_tools", []),
                 )
 
-                if decision.track not in ("fast", "action_query", "action_create", "complex", "clarify"):
+                if decision.track not in ("fast", "dynamic", "action_query", "action_create", "complex", "clarify"):
                     decision = RouterDecision(
                         track="clarify", confidence=0.3,
                         reason=f"LLM 返回未知轨道: {decision.track}",
@@ -335,7 +331,7 @@ class Router:
             )
 
         # 合法性兜底
-        if decision.track not in ("fast", "action_query", "action_create", "complex", "clarify"):
+        if decision.track not in ("fast", "dynamic", "action_query", "action_create", "complex", "clarify"):
             decision = RouterDecision(
                 track="clarify", confidence=0.3,
                 reason=f"LLM 返回未知轨道: {decision.track}",

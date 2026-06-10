@@ -69,14 +69,14 @@ def create_chat_model(model_type: str = "main", temperature: float = 0):
     """创建聊天模型
 
     Args:
-        model_type: "main" 使用 LLM_MODEL（默认 qwen-max）
-                    "router" 使用 ROUTER_MODEL（默认 qwen-mt-flash，轻量快速）
+        model_type: "main" 使用 LLM_MODEL（默认 qwen-plus）
+                    "router" 使用 ROUTER_MODEL（默认 qwen-plus）
         temperature: 温度参数（0=确定性, 1=创造性）
     """
     if model_type == "router":
-        model = os.getenv("ROUTER_MODEL", "qwen-max")
+        model = os.getenv("ROUTER_MODEL", "qwen-plus")
     else:
-        model = os.getenv("LLM_MODEL", "qwen-max")
+        model = os.getenv("LLM_MODEL", "qwen-plus")
 
     return ChatOpenAI(
         model=model,

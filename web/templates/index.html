@@ -624,6 +624,50 @@
             font-size: 11px; color: var(--text-secondary); margin-top: 2px;
         }
 
+        /* ReAct Thinking Chain Panel */
+        .react-panel {
+            margin-top: 10px;
+            border: 1px solid #d6d8db;
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            background: #fafbfc;
+        }
+        .react-panel .react-header {
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            user-select: none;
+            border-bottom: 1px solid var(--border);
+        }
+        .react-panel .react-header i { transition: transform 0.2s; }
+        .react-panel .react-header.collapsed i { transform: rotate(-90deg); }
+        .react-panel .react-steps {
+            padding: 8px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            max-height: 280px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+        .react-panel .react-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            padding: 3px 0;
+            line-height: 1.5;
+            color: var(--text-secondary);
+        }
+        .react-panel .react-step .react-icon { flex-shrink: 0; width: 18px; text-align: center; }
+        .react-panel .react-step.thought { color: #636e72; font-style: italic; }
+        .react-panel .react-step.tool_call { color: #0984e3; }
+        .react-panel .react-step.tool_result { color: #00b894; }
+
         /* Debug Panel */
         .debug-panel {
             position: fixed;
@@ -1151,6 +1195,75 @@
         if (steps) steps.style.display = steps.style.display === 'none' ? '' : 'none';
     }
 
+    // ============================================================
+    // ReAct Thinking Chain Panel (防坑2: 滚动锁定 + 完成后自动折叠)
+    // ============================================================
+    let currentReactPanel = null;
+    let currentReactSteps = null;
+
+    function ensureReactPanel() {
+        if (!currentBotBubble) return;
+        if (!currentReactPanel) {
+            currentReactPanel = document.createElement('div');
+            currentReactPanel.className = 'react-panel';
+            currentReactPanel.innerHTML = `
+                <div class="react-header" onclick="toggleReact(this)">
+                    <i class="fas fa-chevron-down"></i> 🧠 思考过程
+                </div>
+                <div class="react-steps"></div>`;
+            // Insert BEFORE any orch-block or text nodes
+            const firstChild = currentBotBubble.firstChild;
+            if (firstChild) {
+                currentBotBubble.insertBefore(currentReactPanel, firstChild);
+            } else {
+                currentBotBubble.appendChild(currentReactPanel);
+            }
+            currentReactSteps = currentReactPanel.querySelector('.react-steps');
+        }
+    }
+
+    function addReactStep(data) {
+        ensureReactPanel();
+        if (!currentReactSteps) return;
+
+        const step = document.createElement('div');
+        const eventType = data.event || '';
+        let icon, text, cls;
+        if (eventType === 'thought') {
+            icon = '💭'; text = data.text || ''; cls = 'thought';
+        } else if (eventType === 'tool_call') {
+            icon = '🔧'; text = data.text || `调用 ${data.tool || '?'}`; cls = 'tool_call';
+        } else if (eventType === 'tool_result') {
+            icon = '✅'; text = data.text || ''; cls = 'tool_result';
+        } else {
+            icon = '·'; text = JSON.stringify(data); cls = '';
+        }
+        step.className = 'react-step ' + cls;
+        step.innerHTML = `<span class="react-icon">${icon}</span><span>${escapeHtml(text)}</span>`;
+        currentReactSteps.appendChild(step);
+
+        // 防坑2: 流式期间强制滚动到底部
+        scrollToBottom();
+    }
+
+    function toggleReact(header) {
+        header.classList.toggle('collapsed');
+        const steps = header.nextElementSibling;
+        if (steps) steps.style.display = steps.style.display === 'none' ? '' : 'none';
+    }
+
+    function collapseReactPanel() {
+        // 防坑2: 流式结束后自动折叠思考面板，节省屏幕空间
+        if (currentReactPanel) {
+            const header = currentReactPanel.querySelector('.react-header');
+            if (header && !header.classList.contains('collapsed')) {
+                header.classList.add('collapsed');
+                const steps = currentReactPanel.querySelector('.react-steps');
+                if (steps) steps.style.display = 'none';
+            }
+        }
+    }
+
     function addBotText(text) {
         if (!currentBotBubble) addBotMessage();
         // Append text node or replace
@@ -1344,7 +1457,19 @@
             });
             if (!valid) return;
 
-            // Build request
+            // ── v7: 聊天流确认 (DynamicActionAgent cross-turn resume) ──
+            if (cardData.confirm_action === 'chat') {
+                // 防坑3: 禁用同气泡内所有卡片按钮，防止并发竞态
+                const allCards = wrapper.closest('.msg-content')?.querySelectorAll('.confirm-card');
+                allCards?.forEach(c => {
+                    c.querySelectorAll('button').forEach(b => b.disabled = true);
+                });
+                // 通过聊天流发送确认消息 → route_node → dynamic_action resume
+                sendMessage(cardData.confirm_message || '确认');
+                return;
+            }
+
+            // Build request (旧卡片路径: REST API 直接调用)
             let actionUrl = cardData.action || '';
             for (const [k, v] of Object.entries(values)) {
                 actionUrl = actionUrl.replace(`{${k}}`, encodeURIComponent(v));
@@ -1484,8 +1609,25 @@
                     const trimmed = line.trim();
                     if (!trimmed) continue;
 
+                    // --- ReAct thinking chain (dynamic agent real-time reasoning) ---
+                    if (trimmed.startsWith('[REACT]')) {
+                        const reactJson = trimmed.substring(7); // remove "[REACT]"
+                        try {
+                            const reactData = JSON.parse(reactJson);
+                            // First REACT event → hide thinking, create bot bubble
+                            if (!botBubbleCreated) {
+                                hideThinking();
+                                addBotMessage();
+                                botBubbleCreated = true;
+                            }
+                            ensureReactPanel();
+                            addReactStep(reactData);
+                        } catch (e) {
+                            console.error('REACT parse error:', e);
+                        }
+
                     // --- Real-time stream tokens (token-by-token LLM output) ---
-                    if (trimmed.startsWith('[STREAM]')) {
+                    } else if (trimmed.startsWith('[STREAM]')) {
                         const content = trimmed.substring(8); // remove "[STREAM]"
                         // First stream token → hide thinking, create bot bubble
                         if (!botBubbleCreated) {
@@ -1543,6 +1685,14 @@
                         addOrchStep('plan', trimmed.replace('[COMPLEX]', '').trim());
                         addDebugEntry('event', 'complex_track', '进入复杂通道');
 
+                    } else if (trimmed.startsWith('[DYNAMIC]')) {
+                        currentTrack = 'dynamic';
+                        setPipelineTrack('dynamic');
+                        const dynContent = trimmed.replace('[DYNAMIC]', '').trim();
+                        updateThinking(dynContent);
+                        addOrchStep('delegate', dynContent);
+                        addDebugEntry('event', 'dynamic_track', dynContent);
+
                     } else if (trimmed.startsWith('[CARD]')) {
                         // Confirmation card — render interactive form in chat
                         const cardJson = trimmed.substring(6); // remove "[CARD]"
@@ -1571,6 +1721,8 @@
                     // --- Completion ---
                     } else if (trimmed === '[DONE]') {
                         addDebugEntry('event', 'system', '编排完成');
+                        // 防坑2: 流式结束后自动折叠思考面板
+                        collapseReactPanel();
 
                     // --- Backward compat: old tags ---
                     } else if (trimmed.startsWith('[ORCHESTRATOR]')) {

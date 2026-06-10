@@ -16,12 +16,12 @@ class AppSettings(BaseSettings):
     dashscope_api_key: Optional[str] = Field(default=None, alias="DASHSCOPE_API_KEY")
 
     # LLM 模型
-    llm_model: str = Field(default="qwen-max", alias="LLM_MODEL")
+    llm_model: str = Field(default="qwen-plus", alias="LLM_MODEL")
     llm_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         alias="LLM_BASE_URL"
     )
-    router_model: str = Field(default="qwen-max", alias="ROUTER_MODEL")
+    router_model: str = Field(default="qwen-plus", alias="ROUTER_MODEL")
 
     # Embedding 模型
     embedding_model: str = Field(default="text-embedding-v4", alias="EMBEDDING_MODEL")

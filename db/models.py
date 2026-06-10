@@ -129,3 +129,26 @@ class MeetingRoomBooking(Base):
                     comment="confirmed | cancelled")
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Integer, default=1)
+
+
+class InventoryItem(Base):
+    """
+    库存物品模型 (v7 新增)
+
+    管理企业办公设备和物品库存。
+    DynamicActionAgent 通过此表查询库存状态，支持模糊搜索。
+    """
+    __tablename__ = 'inventory_items'
+
+    id = Column(Integer, primary_key=True)
+    item_name = Column(String(100), nullable=False, comment="物品名称（含型号）")
+    category = Column(String(50), nullable=False, default="电子设备",
+                      comment="分类: 电子设备 | 外设 | 办公家具 | 耗材")
+    stock = Column(Integer, nullable=False, default=0, comment="当前库存数")
+    min_threshold = Column(Integer, nullable=False, default=2, comment="最低库存阈值")
+    unit_price = Column(Integer, nullable=True, default=0, comment="单价(元)")
+    supplier = Column(String(100), nullable=True, default="", comment="供应商")
+    description = Column(Text, nullable=True, default="")
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -76,6 +76,9 @@ class TicketState(TypedDict):
     # v6: 并行节点结果隔离（防 Race Condition）
     parallel_rag_result: dict     # RAG 查询结果（complex track 并行）
     parallel_tool_result: dict    # ToolAgent 查询结果（complex track 并行）
+    # v7: 动态Agent跨turn状态
+    dynamic_agent_messages: list  # 序列化的消息历史（跨turn恢复）
+    dynamic_agent_proposals: dict # 上一轮的提议（确认后执行）
 
 
 def create_initial_state(user_input: str, thread_id: str = "default",
@@ -90,6 +93,7 @@ def create_initial_state(user_input: str, thread_id: str = "default",
         conversation_phase="initial", last_rag_topic="", last_rag_summary="",
         user_name=user_name, role=role,
         parallel_rag_result={}, parallel_tool_result={},
+        dynamic_agent_messages=[], dynamic_agent_proposals={},
     )
 
 
@@ -145,8 +149,18 @@ async def route_node(state: TicketState) -> TicketState:
     from agents.orchestrator.router import Router
     from agents.orchestrator.agent_registry import agent_registry
 
-    # ── 短路 1: 卡片锁 ──
+    # ── 短路 1: dynamic 确认卡片 (v7) ──
     pending = state.get("pending_card_type", "")
+    if pending and pending.startswith("dynamic_confirm:"):
+        logger.info(f"[Route] dynamic_confirm 卡片锁 pending={pending}，短路 Router → dynamic")
+        state["track"] = "dynamic"
+        state["agent_id"] = "dynamic_action"
+        state["confidence"] = 1.0
+        state["intent"] = "dynamic_resume"
+        state["resolved"] = False
+        return state
+
+    # ── 短路 2: 旧卡片锁 ──
     if pending:
         logger.info(f"[Route] 卡片锁 pending_card={pending}，短路 Router → action_create")
         state["track"] = "action_create"
@@ -893,6 +907,153 @@ async def complex_track_node(state: TicketState) -> TicketState:
     return state
 
 
+async def dynamic_action_node(state: TicketState) -> TicketState:
+    """
+    动态动作节点 (v7.1) — ReAct 循环 + 跨turn确认
+
+    双模式:
+      模式A (首次): 收集信息 → 生成确认卡片 → 暂停等用户确认
+      模式B (确认): 恢复状态 → 实际创建工单 → 完成
+    """
+    from agents.sub_agents.dynamic_action_agent import DynamicActionAgent
+    from langgraph.config import get_stream_writer
+    from agents.a2a.protocol import AgentMessage as AM
+
+    user_text = _get_user_text(state)
+    writer = get_stream_writer()
+    agent = DynamicActionAgent()
+    is_resume = state.get("intent") == "dynamic_resume"
+
+    delegation = AM.create_delegation(
+        from_agent="orchestrator",
+        to_agent="dynamic_action",
+        payload={
+            "user_input": user_text,
+            "user_name": state.get("user_name", ""),
+            "conversation_history": _build_conversation_context(state["messages"]),
+        },
+        trace_id=state.get("thread_id", ""),
+    )
+
+    # ================================================================
+    # 模式B: 用户确认了卡片，恢复状态并实际执行
+    # ================================================================
+    if is_resume:
+        saved_messages = state.get("dynamic_agent_messages", [])
+        saved_proposals = state.get("dynamic_agent_proposals", {})
+
+        logger.info(
+            f"[DynamicAction:resume] 恢复 {len(saved_messages)} 条消息, "
+            f"{len(saved_proposals)} 个提议, 执行确认模式"
+        )
+
+        try:
+            result = await agent.execute_confirm(
+                delegation, saved_messages, saved_proposals,
+            )
+            state["final_response"] = result.payload.get("direct_response", "Tickets created.")
+            state["agent_results"]["dynamic_action"] = {
+                "success": result.success,
+                "payload": result.payload,
+                "error": result.error,
+            }
+            state["pending_card_type"] = ""
+            state["dynamic_agent_messages"] = []
+            state["dynamic_agent_proposals"] = {}
+            state["resolved"] = True
+            logger.info("[DynamicAction:resume] 确认执行完成")
+        except Exception as e:
+            logger.error(f"[DynamicAction:resume] 失败: {e}")
+            state["final_response"] = f"执行失败: {e}"
+            state["resolved"] = True
+        return state
+
+    # ================================================================
+    # 模式A: 首次执行 — 收集信息 + 生成确认卡片
+    # ================================================================
+    try:
+        final_answer = ""
+        cards_collected: list[dict] = []
+
+        async for event in agent.execute_with_stream(delegation):
+            event_type = event.get("event", "")
+
+            if event_type in ("thought", "tool_call", "tool_result"):
+                writer(f"[REACT]{json.dumps(event, ensure_ascii=False)}")
+
+            elif event_type == "card":
+                card = event.get("card")
+                if card:
+                    cards_collected.append(card)
+                    writer(f"[CARD]{json.dumps(card, ensure_ascii=False)}")
+
+            elif event_type == "final":
+                final_answer = event.get("text", "")
+                # 不通过 StreamWriter 发射 — 避免与 final_response 重复
+                # 文本将通过 _yield_stream_event 从 final_response 统一输出
+
+        # ── 设置状态 ──
+        # 关键: final_response 只含纯文本, 不含 [CARD] 标签
+        # 卡片已通过 StreamWriter 实时推送, 此处避免 _yield_stream_event 二次发射
+        if cards_collected:
+            desc_lines = []
+            for card in cards_collected:
+                desc_lines.append(f"{card.get('title', '')}:\n{card.get('description', '')}")
+            state["final_response"] = (
+                "📋 **Please confirm the following:**\n\n"
+                + "\n\n---\n\n".join(desc_lines)
+            )
+            state["agent_results"]["dynamic_action"] = {
+                "success": True, "payload": {}, "error": None,
+                "cards": cards_collected,
+            }
+            # 保存 agent 状态用于确认后恢复
+            state["dynamic_agent_messages"] = _serialize_messages(agent._last_messages)
+            state["dynamic_agent_proposals"] = getattr(agent, '_proposals', {})
+            state["pending_card_type"] = "dynamic_confirm:proposals"
+            state["resolved"] = True  # 本轮结束，但卡片锁会让下一轮回到这里
+            logger.info(
+                f"[DynamicAction] {len(cards_collected)} cards, "
+                f"pending=dynamic_confirm, messages_saved={len(state['dynamic_agent_messages'])}"
+            )
+        else:
+            state["final_response"] = final_answer or "Done."
+            state["agent_results"]["dynamic_action"] = {
+                "success": True,
+                "payload": {"direct_response": final_answer},
+                "error": None,
+            }
+            state["resolved"] = True
+
+    except Exception as e:
+        logger.error(f"[DynamicAction] Failed: {e}")
+        state["final_response"] = "Sorry, something went wrong. Please try again or contact the service desk."
+        state["resolved"] = True
+
+    return state
+
+
+def _serialize_messages(messages: list) -> list:
+    """将 LangChain 消息列表序列化为可存储的字典列表"""
+    if not messages:
+        return []
+    result = []
+    for m in messages:
+        entry = {"role": m.get("role", "") if isinstance(m, dict) else getattr(m, "role", "system")}
+        content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+        entry["content"] = str(content)[:2000]
+        if isinstance(m, dict) and m.get("tool_calls"):
+            entry["tool_calls"] = m["tool_calls"]
+        elif hasattr(m, "tool_calls") and m.tool_calls:
+            entry["tool_calls"] = m.tool_calls
+        if isinstance(m, dict) and m.get("tool_call_id"):
+            entry["tool_call_id"] = m["tool_call_id"]
+        elif hasattr(m, "tool_call_id") and m.tool_call_id:
+            entry["tool_call_id"] = m.tool_call_id
+        result.append(entry)
+    return result
+
+
 async def clarification_node(state: TicketState) -> TicketState:
     """
     反问节点：AI 不确定用户意图时，主动反问澄清
@@ -963,15 +1124,22 @@ async def respond_node(state: TicketState) -> TicketState:
 # ============================================================
 
 def route_after_route(state: TicketState) -> Literal[
-    "re_evaluate", "fast_track", "action_track", "complex_track", "clarification",
+    "re_evaluate", "fast_track", "dynamic_action", "action_track", "complex_track", "clarification",
 ]:
-    """路由分发 — v6 增加 action_query / action_create 分支"""
+    """
+    路由分发 (v7: 新增 dynamic_action)
+
+    v7 变化:
+      - action_query / action_create / complex 三轨合一为 dynamic
+      - 保留旧轨道作为 fallback（渐进迁移）
+    """
     track = state.get("track", "clarification")
     if track == "re_evaluate":     return "re_evaluate"
     if track == "fast":            return "fast_track"
-    elif track == "action_query":  return "action_track"
-    elif track == "action_create": return "action_track"
-    elif track == "complex":       return "complex_track"
+    elif track == "dynamic":       return "dynamic_action"
+    elif track == "action_query":  return "action_track"   # 向后兼容
+    elif track == "action_create": return "action_track"   # 向后兼容
+    elif track == "complex":       return "complex_track"  # 向后兼容
     else:                          return "clarification"
 
 
@@ -1014,6 +1182,7 @@ def build_orchestration_workflow() -> StateGraph:
     workflow.add_node("route", route_node)
     workflow.add_node("re_evaluate", re_evaluate_node)
     workflow.add_node("fast_track", fast_track_node)
+    workflow.add_node("dynamic_action", dynamic_action_node)   # v7: ReAct 自由编排
     workflow.add_node("action_track", action_track_node)
     workflow.add_node("complex_track", complex_track_node)
     workflow.add_node("clarification", clarification_node)
@@ -1021,10 +1190,11 @@ def build_orchestration_workflow() -> StateGraph:
 
     workflow.set_entry_point("route")
 
-    # route → 五路分发
+    # route → 六路分发 (v7: 新增 dynamic_action)
     workflow.add_conditional_edges("route", route_after_route, {
         "re_evaluate": "re_evaluate",
         "fast_track": "fast_track",
+        "dynamic_action": "dynamic_action",
         "action_track": "action_track",
         "complex_track": "complex_track",
         "clarification": "clarification",
@@ -1039,7 +1209,7 @@ def build_orchestration_workflow() -> StateGraph:
     })
 
     workflow.add_edge("fast_track", "respond")
-    # action_track 用条件边：new_topic → 回 route 重路由，其余 → respond
+    workflow.add_edge("dynamic_action", "respond")   # v7: dynamic 完成后直接 respond
     workflow.add_conditional_edges("action_track", after_action_track, {
         "route": "route",
         "respond": "respond",
@@ -1071,6 +1241,8 @@ def _yield_stream_event(node_name: str, node_state: dict):
             yield "[ACTION_QUERY] 🔍 数据查询 · ToolAgent\n"
         else:
             yield "[ACTION] ⚡ 动作通道 · 工单派发\n"
+    elif node_name == "dynamic_action":
+        yield "[DYNAMIC] 🧠 动态编排 · ReAct 循环\n"
     elif node_name == "complex_track":
         yield "[COMPLEX] 🧩 复杂通道 · 多步骤编排\n"
     elif node_name == "clarification":
@@ -1140,6 +1312,7 @@ class OrchestrationWorkflowRunner:
             import agents.sub_agents.enterprise_rag     # noqa: F401
             import agents.sub_agents.ticket_dispatch    # noqa: F401
             import agents.sub_agents.tool_agent         # noqa: F401
+            import agents.sub_agents.dynamic_action_agent  # noqa: F401  v7: ReAct自由编排
             import agents.tools.builtin_tools           # noqa: F401  工具注册
         except ImportError as e:
             logger.warning(f"Agent 模块加载警告: {e}")
@@ -1197,6 +1370,19 @@ class OrchestrationWorkflowRunner:
                 prev_agent_results = prev.values.get("agent_results", {})
                 if prev_agent_results:
                     initial_state["agent_results"] = prev_agent_results
+                # ★ v7: 恢复 dynamic agent 跨turn状态 (防坑1: 避免Turn2失忆)
+                if pending_card.startswith("dynamic_confirm:"):
+                    initial_state["dynamic_agent_messages"] = prev.values.get(
+                        "dynamic_agent_messages", [],
+                    )
+                    initial_state["dynamic_agent_proposals"] = prev.values.get(
+                        "dynamic_agent_proposals", {},
+                    )
+                    logger.info(
+                        f"[Stream] 恢复 dynamic agent 状态: "
+                        f"{len(initial_state['dynamic_agent_messages'])} msgs, "
+                        f"{len(initial_state['dynamic_agent_proposals'])} proposals"
+                    )
 
             # v5: 继承用户身份（新请求未带身份时用上一次的）
             if not initial_state["user_name"] and prev.values.get("user_name"):
@@ -1204,25 +1390,34 @@ class OrchestrationWorkflowRunner:
                 initial_state["role"] = prev.values.get("role", "employee")
 
         if pending_card:
-            # 跳过 Router，直送 action_track 让 Agent 分类意图
-            initial_state["pending_card_type"] = pending_card
-            initial_state["track"] = "action_create"
+            # ── v7: dynamic_confirm 卡片 → 走正常流式通道 (route_node 短路到 dynamic_action) ──
+            if pending_card.startswith("dynamic_confirm:"):
+                initial_state["pending_card_type"] = pending_card
+                yield f"[ROUTE] 📋 Processing your confirmation...\n"
+                yield "[THINKING] 🔍 Resuming agent with your approval...\n"
+                # ★ 不 return — 落入下方 stream_mode=["updates","custom"] 正常流式路径
+                # route_node 会检测 dynamic_confirm:* 并短路到 dynamic_action (resume模式)
 
-            yield f"[ROUTE] 📋 处理您对「{pending_card}」卡片的回复\n"
-            yield "[THINKING] 🔍 正在理解您的意图...\n"
+            # ── 旧卡片锁: 直送 action_track ──
+            else:
+                initial_state["pending_card_type"] = pending_card
+                initial_state["track"] = "action_create"
 
-            async for event in self.app.astream(initial_state, config):
-                for node_name, node_state in event.items():
-                    if node_name == "action_track":
-                        yield "[ACTION] ⚡ 动作通道 · 处理卡片回复\n"
-                        if node_state.get("re_route"):
-                            yield "[ROUTE] 🔄 切换话题，重新分析...\n"
-                            yield "[THINKING] 🔍 正在路由到对应轨道...\n"
-                    for _y in _yield_stream_event(node_name, node_state):
-                        yield _y
+                yield f"[ROUTE] 📋 处理您对「{pending_card}」卡片的回复\n"
+                yield "[THINKING] 🔍 正在理解您的意图...\n"
 
-            yield "[DONE]\n"
-            return
+                async for event in self.app.astream(initial_state, config):
+                    for node_name, node_state in event.items():
+                        if node_name == "action_track":
+                            yield "[ACTION] ⚡ 动作通道 · 处理卡片回复\n"
+                            if node_state.get("re_route"):
+                                yield "[ROUTE] 🔄 切换话题，重新分析...\n"
+                                yield "[THINKING] 🔍 正在路由到对应轨道...\n"
+                        for _y in _yield_stream_event(node_name, node_state):
+                            yield _y
+
+                yield "[DONE]\n"
+                return
 
         # ================================================================
         # 非锁模式：graph 全权接管
@@ -1241,8 +1436,16 @@ class OrchestrationWorkflowRunner:
             if isinstance(event, tuple) and len(event) == 2:
                 mode, data = event
                 if mode == "custom":
-                    # StreamWriter 发射的 token → [STREAM]
-                    yield f"[STREAM]{data}\n"
+                    # StreamWriter 发射的数据 — 根据前缀决定标签
+                    # [REACT] → 思维链标签（前端渲染为可折叠面板）
+                    # [CARD]  → 卡片标签
+                    # 其他    → [STREAM] 流式文本
+                    if isinstance(data, str) and (
+                        data.startswith("[REACT]") or data.startswith("[CARD]")
+                    ):
+                        yield f"{data}\n"
+                    else:
+                        yield f"[STREAM]{data}\n"
                     continue
                 elif mode == "updates":
                     # {node_name: changed_state} → _yield_stream_event
