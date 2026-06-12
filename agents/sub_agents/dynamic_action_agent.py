@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncGenerator, Literal
+from typing import AsyncGenerator, Literal
 
 from pydantic import BaseModel, Field
 
@@ -172,7 +172,14 @@ DYNAMIC_ACTION_TOOLS = [
             "- title: 工单标题\n"
             "- description: 详细描述\n"
             "- priority: P0-P3（默认P2）\n"
-            "- extra: 扩展字段。admin类型用service_type区分: 资产领用/采购申请/会议室预定等\n"
+            "- extra: 扩展字段，按 ticket_type 填写:\n"
+            "  * leave: {\"leave_type\":\"病假|年假|事假|调休\", \"start_date\":\"YYYY-MM-DD\", "
+            "\"end_date\":\"YYYY-MM-DD\", \"total_days\":N}\n"
+            "    务必从对话历史中提取天数、日期、类型，不要遗漏！\n"
+            "    例: 用户说\"请4天病假明天开始\" → total_days=4, leave_type=病假, start_date=明天\n"
+            "  * expense: {\"expense_type\":\"差旅|办公|餐费|其他\", \"amount\":N, \"description\":\"...\"}\n"
+            "  * admin: {\"service_type\":\"资产领用|asset_requisition|采购申请|procurement|...\"}\n"
+            "  * it_fault: {\"category\":\"硬件|软件|网络|账号\", \"urgency\":\"high|medium|low\"}\n"
             "返回: 提议的工单摘要（状态=proposed，等待用户确认）"
         ),
         parameters={
@@ -251,6 +258,27 @@ class DynamicActionAgent(BaseSubAgent):
         self._knowledge_service = None  # 懒加载
         self._inventory_seeded = False
         self._execution_mode = False  # True = 确认后实际创建工单
+        self._db_router = None  # 懒加载（共享 DB 连接）
+        self._db_session = None  # 共享 session factory
+        # ★ v9: A2A 委派上下文 — 供 _tool_create_ticket 构造委派消息
+        self._last_user_input = ""
+        self._last_user_name = ""
+        self._last_user_role = "employee"
+        self._last_trace_id = ""
+        # ★ v9: 提案缓存 — 每次图迭代时通过 graph_workflow 重置
+        self._proposals = {}
+
+    @property
+    def db_router(self):
+        """懒加载 DatabaseRouter（共享连接，避免每个方法独立创建 engine）"""
+        if self._db_router is None:
+            from db.db_router import DatabaseRouter
+            self._db_router = DatabaseRouter()
+        return self._db_router
+
+    def _get_session(self):
+        """获取共享数据库 session（通过 DatabaseRouter 的 SessionManager）"""
+        return self.db_router.session_manager.Session()
 
     # ================================================================
     # 库存种子数据
@@ -314,16 +342,8 @@ class DynamicActionAgent(BaseSubAgent):
 
         try:
             from db.models import InventoryItem
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker
-            import os
 
-            db_path = os.path.join("data", "ticket_dispatch.db")
-            engine = create_engine(
-                f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
-            )
-            SessionLocal = sessionmaker(bind=engine)
-            db = SessionLocal()
+            db = self._get_session()
             try:
                 count = db.query(InventoryItem).filter(
                     InventoryItem.is_active == 1,
@@ -372,27 +392,55 @@ class DynamicActionAgent(BaseSubAgent):
         return schemas
 
     def _build_system_prompt(self, user_name: str = "") -> str:
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        weekday = ["周一","周二","周三","周四","周五","周六","周日"][datetime.now().weekday()]
         user_context = f"Current user: {user_name}." if user_name else ""
         return (
             "You are the enterprise AI service desk Dynamic Action Agent.\n\n"
             f"{user_context}\n"
+            f"Today is {today} ({weekday}). Use this for date calculations.\n\n"
             "## CRITICAL RULES\n\n"
             "### Rule 0: PARALLEL TOOL CALLS (MOST IMPORTANT)\n"
             "ALWAYS call multiple independent tools in ONE response to save iterations.\n"
             "Example: search_knowledge_base + check_inventory(laptop) + check_inventory(monitor)\n"
             "  + check_inventory(keyboard) ALL at once in a single LLM response.\n"
-            "Each tool call in parallel counts as ONE iteration. You have 15 iterations max.\n\n"
+            "Each tool call in parallel counts as ONE iteration. You have 15 iterations max.\n"
+            "⚠️ EXCEPTION: NEVER call create_ticket in parallel with other tools.\n"
+            "  create_ticket triggers user confirmation → all other results would be stale.\n"
+            "  Always call create_ticket ALONE in its own response.\n\n"
+            "### Rule 0.5: TOPIC-AWARE CONTEXT MERGING\n"
+            "Conversation history is provided for context. However:\n\n"
+            "**Step 1 — Topic Check (ALWAYS DO THIS FIRST)**:\n"
+            "  - Is the latest user message about the SAME topic as the conversation history?\n"
+            "  - Same topic → use history to fill missing details (slot filling)\n"
+            "  - DIFFERENT topic → IGNORE the history entirely, process as a fresh request\n\n"
+            "**Step 2 — Same-Topic Merging** (only when Step 1 confirms same topic):\n"
+            "  - Example: User said '我要请4天假' then '病假 明天开始'\n"
+            "    → Merge: total_days=4 + leave_type=病假 + start=明天\n"
+            "  - Example: User said '前端入职' then '要MacBook和显示器'\n"
+            "    → Merge: 前端入职 + MacBook + 显示器\n\n"
+            "**Step 3 — Different Topic** (when Step 1 detects topic switch):\n"
+            "  - Example: History is about 请假 → user now says '帮我准备前端入职设备'\n"
+            "    → This is about EQUIPMENT, not leave. Process as a fresh equipment request.\n"
+            "    → Do NOT reference, merge, or continue the leave topic.\n"
+            "  - Example: History is about 网络故障 → user now says '帮我查年假政策'\n"
+            "    → This is about POLICY. Process as a fresh policy query.\n\n"
+            "**Key principle**: The latest user message ALWAYS takes precedence.\n"
+            "History ONLY supplements when it's clearly the same topic.\n"
+            "When in doubt, treat as new topic.\n\n"
             "### Rule 1: Two-Phase Execution\n"
             "**Phase 1 - Gather Info**: Collect ALL necessary info in ONE PARALLEL batch.\n"
             "  - search_knowledge_base + ALL check_inventory calls in ONE response\n"
             "  - web_search only when items are out of stock or low\n"
             "  - DO NOT propose tickets until ALL info is gathered.\n\n"
-            "**Phase 2 - Propose Merged Tickets**: Only after ALL info collected.\n"
-            "  - MERGE: all in-stock items -> ONE requisition ticket (service_type=asset_requisition)\n"
-            "  - MERGE: all out-of-stock/low-stock items -> ONE procurement ticket (service_type=procurement)\n"
-            "  - Call BOTH create_ticket in ONE PARALLEL response.\n"
-            "  - MAXIMUM 2 create_ticket calls total. NEVER one ticket per item!\n"
-            "  - create_ticket is a PROPOSAL, not execution. User must confirm.\n\n"
+            "**Phase 2 - Propose Tickets ONE AT A TIME**: Only after ALL info collected.\n"
+            "  - Call create_ticket ONE AT A TIME (one per LLM response).\n"
+            "  - Each create_ticket will interrupt for user confirmation immediately.\n"
+            "  - After user confirms → you will see the result → call the next one.\n"
+            "  - MERGE related items: all in-stock items in ONE requisition ticket,\n"
+            "    all out-of-stock items in ONE procurement ticket.\n"
+            "  - create_ticket is a PROPOSAL that triggers confirmation. NOT auto-executed.\n\n"
             "### Rule 2: Merge Same-Type Items\n"
             "All requisition items -> 1 merged ticket. All procurement items -> 1 merged ticket.\n\n"
             "### Rule 3: Do NOT execute. Only propose.\n"
@@ -452,16 +500,8 @@ class DynamicActionAgent(BaseSubAgent):
 
         try:
             from db.models import InventoryItem
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker
-            import os
 
-            db_path = os.path.join("data", "ticket_dispatch.db")
-            engine = create_engine(
-                f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
-            )
-            SessionLocal = sessionmaker(bind=engine)
-            db = SessionLocal()
+            db = self._get_session()
             try:
                 # 1. 精确匹配
                 exact = db.query(InventoryItem).filter(
@@ -545,9 +585,7 @@ class DynamicActionAgent(BaseSubAgent):
         """查询工单状态"""
         ticket_number = args.get("ticket_number", "")
         try:
-            from db.db_router import DatabaseRouter
-            db = DatabaseRouter()
-            tickets = db.ticket.list_tickets(limit=100)
+            tickets = self.db_router.ticket.list_tickets(limit=100)
             for t in tickets:
                 if t.get("ticket_number") == ticket_number:
                     return json.dumps({
@@ -585,13 +623,8 @@ class DynamicActionAgent(BaseSubAgent):
         capacity = args.get("capacity", 0)
         try:
             from db.models import MeetingRoom, MeetingRoomBooking
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker
-            import os
-            db_path = os.path.join("data", "ticket_dispatch.db")
-            engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-            SessionLocal = sessionmaker(bind=engine)
-            db = SessionLocal()
+
+            db = self._get_session()
             try:
                 # 所有活跃房间
                 rooms_q = db.query(MeetingRoom).filter(
@@ -626,86 +659,182 @@ class DynamicActionAgent(BaseSubAgent):
 
     async def _tool_create_ticket(self, args: dict) -> str:
         """
-        工单工具 — 提议模式/执行模式双模式。
+        工单工具 — 通过 A2A 委派给 TicketDispatch，不自己写 SQL。
 
         提议模式 (self._execution_mode=False):
-          仅记录提议，不写入 DB。同类提议自动合并去重。
+          TicketDispatch 做合规检查 + 生成专业卡片 → 存入 _proposals。
+          同类工单自动合并去重。
 
         执行模式 (self._execution_mode=True):
-          实际创建工单到 DB。用户已确认，直接执行。
+          TicketDispatch 落库到 DB → 返回工单号。
         """
+        from agents.a2a.protocol import AgentMessage as AM
+
         ticket_type = args.get("ticket_type", "admin")
         title = args.get("title", "")
         description = args.get("description", "")
         extra = args.get("extra", {})
         service_type = extra.get("service_type", "")
 
-        # ── 执行模式：实际创建工单 ──
-        if self._execution_mode:
-            try:
-                from db.db_router import DatabaseRouter
-                db = DatabaseRouter()
-                extra_payload = {"service_type": service_type}
-                if ticket_type == "admin":
-                    extra_payload.update(extra)
-
-                ticket = db.ticket.add_ticket(
-                    ticket_type=ticket_type,
-                    title=title,
-                    description=description,
-                    category=service_type or "其他",
-                    priority=args.get("priority", "P2"),
-                    requester_id="dynamic_agent",
-                    requester_name="",
-                    trace_id=f"dynamic_exec_{id(args)}",
-                    payload=extra_payload,
+        # ── 获取 TicketDispatch Agent ──
+        td_agent = agent_registry.get_agent("ticket_dispatch")
+        if td_agent is None:
+            logger.error("[DynamicAction] TicketDispatch Agent 不可用")
+            if self._execution_mode:
+                return json.dumps(
+                    {"executed": False, "error": "工单服务不可用"},
+                    ensure_ascii=False,
                 )
-                return json.dumps({
-                    "executed": True,
-                    "ticket_number": ticket.get("ticket_number", ""),
-                    "ticket_id": ticket.get("id", ""),
-                    "ticket_type": ticket_type,
-                    "status": ticket.get("status", "created"),
-                    "title": title,
-                }, ensure_ascii=False)
-            except Exception as e:
-                return json.dumps({"executed": False, "error": str(e)}, ensure_ascii=False)
+            return json.dumps(
+                {"status": "error", "message": "工单服务不可用"},
+                ensure_ascii=False,
+            )
 
-        # ── 提议模式：存储提议 ──
-        key = f"{ticket_type}:{service_type}"
-        proposal = {
+        # ── 构造 A2A 委派消息 ──
+        pre_extracted = {
             "ticket_type": ticket_type,
             "title": title,
             "description": description,
+            "category": service_type or "其他",
             "priority": args.get("priority", "P2"),
             "extra": extra,
-            "service_type": service_type,
         }
-        self._proposals[key] = proposal
-        return json.dumps({
-            "status": "proposed",
-            "message": f"Proposed: {title} (awaiting confirmation)",
-            "merged_count": len(self._proposals),
-            "ticket_type": ticket_type,
-            "service_type": service_type,
-            "title": title,
-        }, ensure_ascii=False)
+
+        delegation = AM.create_delegation(
+            from_agent=self.agent_id,
+            to_agent="ticket_dispatch",
+            payload={
+                "user_input": self._last_user_input,
+                "task": (
+                    "执行已确认的工单创建" if self._execution_mode
+                    else "提取参数、合规检查、生成确认卡片（不落库）"
+                ),
+                "intent_category": "action",
+                "urgency": args.get("priority", "P2"),
+                "user_id": self._last_user_name,
+                "user_name": self._last_user_name,
+                "role": self._last_user_role,
+                "confirmed": self._execution_mode,
+                "pre_extracted": pre_extracted,
+            },
+            trace_id=self._last_trace_id,
+        )
+
+        try:
+            result = await td_agent.execute(delegation)
+
+            # ── 执行模式：TicketDispatch 已落库 ──
+            if self._execution_mode:
+                if result.success and result.payload.get("executed"):
+                    ticket_number = result.payload.get("ticket_number", "")
+                    logger.info(
+                        f"[DynamicAction] TicketDispatch 落库成功: {ticket_number}"
+                    )
+                    return json.dumps({
+                        "executed": True,
+                        "ticket_number": ticket_number,
+                        "ticket_id": result.payload.get("ticket_id", ""),
+                        "ticket_type": ticket_type,
+                        "status": result.payload.get("status", "created"),
+                        "title": title,
+                        "message": result.payload.get("direct_response", "工单已创建"),
+                    }, ensure_ascii=False)
+                else:
+                    error = result.error or result.payload.get("direct_response", "未知错误")
+                    logger.error(f"[DynamicAction] TicketDispatch 落库失败: {error}")
+                    return json.dumps(
+                        {"executed": False, "error": str(error)[:200]},
+                        ensure_ascii=False,
+                    )
+
+            # ── 提议模式：TicketDispatch 返回专业卡片 ──
+            if result.success and result.payload.get("return_card"):
+                card = result.payload.get("card", {})
+                result_ticket_type = result.payload.get("ticket_type", ticket_type)
+
+                # ★ 用 TicketDispatch 生成的完整卡片代替自建简化版
+                key = f"{result_ticket_type}:{service_type}"
+                self._proposals[key] = {
+                    "ticket_type": result_ticket_type,
+                    # 用 LLM 原始业务标题（非卡片展示标题 "📦 设备领用"），确保 confirm 阶段落库正确
+                    "title": title,
+                    "description": description,
+                    "priority": args.get("priority", "P2"),
+                    "extra": extra,
+                    "service_type": service_type,
+                    "card": card,                     # ★ TicketDispatch 完整卡片
+                    "source": "ticket_dispatch",      # ★ 标记来源
+                }
+
+                logger.info(
+                    f"[DynamicAction] TicketDispatch 卡片已存储: "
+                    f"key={key}, card_title={card.get('title', '?')[:40]}"
+                )
+                return json.dumps({
+                    "status": "proposed",
+                    "message": f"合规检查通过，{title} 等待确认",
+                    "merged_count": len(self._proposals),
+                    "ticket_type": result_ticket_type,
+                    "service_type": service_type,
+                    "title": title,
+                }, ensure_ascii=False)
+
+            # TicketDispatch 直接完成了（无需确认的场景，如 it_fault 已解决）
+            if result.success and result.payload.get("direct_response"):
+                return json.dumps({
+                    "executed": True,
+                    "message": result.payload.get("direct_response", "操作完成"),
+                }, ensure_ascii=False)
+
+            # 其他失败情况
+            return json.dumps({
+                "status": "error",
+                "message": result.error or "工单创建失败",
+            }, ensure_ascii=False)
+
+        except Exception as e:
+            logger.error(f"[DynamicAction] TicketDispatch A2A 委派异常: {e}")
+            if self._execution_mode:
+                return json.dumps(
+                    {"executed": False, "error": str(e)},
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {"status": "error", "message": f"工单服务异常: {e}"},
+                ensure_ascii=False,
+            )
 
     @staticmethod
     def _proposals_to_cards(proposals: dict) -> list[dict]:
-        """将提议列表合并为确认卡片"""
+        """
+        将提议列表合并为确认卡片。
+
+        v9: 如果 proposal 来自 TicketDispatch (source="ticket_dispatch")
+        且有完整 card 字段，直接使用其专业卡片（含合规检查结果、fields、alerts）。
+        否则走旧版简化卡片兜底。
+        """
         cards = []
         for key, p in proposals.items():
+            # ★ v9: TicketDispatch 专业卡片 — 直接转发
+            if p.get("source") == "ticket_dispatch" and p.get("card"):
+                card = p["card"]
+                # 确保走聊天中断通道（非直接 REST API 调用）
+                card["confirm_action"] = "chat"
+                card["ticket_type"] = p.get("ticket_type", card.get("ticket_type", "admin"))
+                card["priority"] = p.get("priority", card.get("priority", "P2"))
+                cards.append(card)
+                continue
+
+            # ── 兜底：旧版简化卡片（TicketDispatch 不可用时触发）──
             ticket_type = p["ticket_type"]
             service_type = p.get("service_type", "")
-            # Normalize: accept both English and Chinese service_type
             svc = service_type.lower()
             if svc in ("asset_requisition", "资产领用", "领用"):
-                emoji = "\U0001F4E6"  # 📦
+                emoji = "\U0001F4E6"
                 card_title = "Equipment Requisition"
                 confirm_text = "Confirm Requisition"
             elif svc in ("procurement", "采购申请", "采购"):
-                emoji = "\U0001F6D2"  # 🛒
+                emoji = "\U0001F6D2"
                 card_title = "Procurement Request"
                 confirm_text = "Confirm Procurement"
             elif ticket_type == "it_fault":
@@ -721,7 +850,6 @@ class DynamicActionAgent(BaseSubAgent):
                 card_title = "工单确认"
                 confirm_text = "确认创建"
 
-            # Ensure Chinese service_type for ticket_dispatch compatibility
             dispatch_service_type = service_type
             if svc in ("asset_requisition", "领用"):
                 dispatch_service_type = "资产领用"
@@ -733,7 +861,7 @@ class DynamicActionAgent(BaseSubAgent):
                 "title": f"{emoji} {card_title}",
                 "description": p["description"],
                 "confirm_text": confirm_text,
-                "confirm_action": "chat",  # ★ 走聊天流触发 execute_confirm (非直接调 REST API)
+                "confirm_action": "chat",
                 "confirm_message": "确认创建以上工单",
                 "success_message": f"{card_title} submitted!",
                 "ticket_type": ticket_type,
@@ -761,6 +889,13 @@ class DynamicActionAgent(BaseSubAgent):
         """
         user_input = message.payload.get("user_input", "")
         user_name = message.payload.get("user_name", "")
+
+        # ★ v9: 恢复上下文供 _tool_create_ticket 构造 A2A 委派消息
+        # (resume 时 agent 是新实例，需要重新设置)
+        self._last_user_input = user_input
+        self._last_user_name = user_name
+        self._last_user_role = message.payload.get("role", "employee")
+        self._last_trace_id = message.trace_id
 
         self._execution_mode = True  # 实际创建工单
         self._proposals = proposals
@@ -862,6 +997,12 @@ class DynamicActionAgent(BaseSubAgent):
         user_input = message.payload.get("user_input", "")
         user_name = message.payload.get("user_name", "")
         conversation_history = message.payload.get("conversation_history", "")
+
+        # ★ v9: 保存上下文供 _tool_create_ticket 构造 A2A 委派消息
+        self._last_user_input = user_input
+        self._last_user_name = user_name
+        self._last_user_role = message.payload.get("role", "employee")
+        self._last_trace_id = message.trace_id
 
         # 确保库存种子数据已填充
         await self._ensure_inventory_seeded()
@@ -1022,6 +1163,12 @@ class DynamicActionAgent(BaseSubAgent):
         user_input = message.payload.get("user_input", "")
         user_name = message.payload.get("user_name", "")
         conversation_history = message.payload.get("conversation_history", "")
+
+        # ★ v9: 保存上下文供 _tool_create_ticket 构造 A2A 委派消息
+        self._last_user_input = user_input
+        self._last_user_name = user_name
+        self._last_user_role = message.payload.get("role", "employee")
+        self._last_trace_id = message.trace_id
 
         # 确保库存种子数据已填充
         await self._ensure_inventory_seeded()
@@ -1240,9 +1387,13 @@ class DynamicActionAgent(BaseSubAgent):
             return f"✅ {data.get('date')} {data.get('time')}: {len(available)}/{len(rooms)} 间可用"
 
         elif tool_name == "create_ticket":
+            if data.get("executed"):
+                return f"✅ 工单已创建: {data.get('ticket_number', '?')} ({data.get('status', '?')})"
+            if data.get("status") == "proposed":
+                return f"📋 已提议: {data.get('title', '?')}（等待确认）"
             if data.get("success"):
-                return f"✅ 工单已创建: {data.get('ticket_number')} ({data.get('status')})"
-            return f"❌ 工单创建失败"
+                return f"✅ 工单已创建: {data.get('ticket_number', '?')} ({data.get('status', '?')})"
+            return f"❌ 工单创建失败: {data.get('error', data.get('message', 'unknown'))[:80]}"
 
         return raw[:200] if isinstance(raw, str) else json.dumps(data, ensure_ascii=False)[:200]
 

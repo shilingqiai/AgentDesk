@@ -1151,13 +1151,12 @@
         hideWelcome();
         const div = document.createElement('div');
         div.className = 'message bot';
-        div.innerHTML = `
-            <div class="msg-avatar bot"><i class="fas fa-robot"></i></div>
-            <div class="msg-content">
-                <div class="msg-bubble" id="bot-bubble"></div>
-            </div>`;
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+        div.innerHTML = '<div class="msg-avatar bot"><i class="fas fa-robot"></i></div><div class="msg-content"></div>';
+        div.querySelector('.msg-content').appendChild(bubble);
         chatArea.appendChild(div);
-        currentBotBubble = document.getElementById('bot-bubble');
+        currentBotBubble = bubble;
         currentOrchBlock = null;
         currentOrchSteps = null;
         return div;
@@ -1420,17 +1419,29 @@
         cancelBtn.className = 'btn';
         cancelBtn.textContent = dismissText;
         cancelBtn.onclick = () => {
-            // 清除后端卡片锁状态
-            fetch('/chat/reset-card', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    message: '',
-                    thread_id: threadId,
-                    user_name: currentUser.user_name,
-                    role: currentUser.role,
-                }),
-            }).catch(() => {});
+            // v8: 动态卡片通过 /chat/resume 取消, 旧卡片通过 /chat/reset-card
+            if (cardData.confirm_action === 'chat') {
+                fetch('/chat/resume', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        thread_id: threadId,
+                        action: 'cancel',
+                    }),
+                }).catch(() => {});
+            } else {
+                // 清除后端卡片锁状态
+                fetch('/chat/reset-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        message: '',
+                        thread_id: threadId,
+                        user_name: currentUser.user_name,
+                        role: currentUser.role,
+                    }),
+                }).catch(() => {});
+            }
             wrapper.innerHTML = '<div class="card-fallback"><span style="color:var(--text-secondary);">' +
                 (dismissText === '问题已解决' ? '✅ 问题已解决，无需创建工单' : '已取消') +
                 '</span></div>';
@@ -1457,15 +1468,82 @@
             });
             if (!valid) return;
 
-            // ── v7: 聊天流确认 (DynamicActionAgent cross-turn resume) ──
+            // ── v8: LangGraph interrupt() 恢复 (DynamicActionAgent) ──
             if (cardData.confirm_action === 'chat') {
                 // 防坑3: 禁用同气泡内所有卡片按钮，防止并发竞态
                 const allCards = wrapper.closest('.msg-content')?.querySelectorAll('.confirm-card');
                 allCards?.forEach(c => {
                     c.querySelectorAll('button').forEach(b => b.disabled = true);
                 });
-                // 通过聊天流发送确认消息 → route_node → dynamic_action resume
-                sendMessage(cardData.confirm_message || '确认');
+
+                confirmBtn.disabled = true;
+                confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+                cancelBtn.disabled = true;
+
+                try {
+                    const res = await fetch('/chat/resume', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            thread_id: threadId,
+                            action: 'confirm',
+                        }),
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.status === 'ok') {
+                            // v10: 所有卡片已确认 → 显示 LLM 最终回复到聊天区域
+                            const finalMsg = data.message || cardData.success_message || '操作成功！';
+                            // 把最终回复追加为新 bot 消息
+                            if (finalMsg && finalMsg !== '操作成功！') {
+                                addBotMessage();
+                                if (currentBotBubble) {
+                                    currentBotBubble.innerHTML = escapeHtml(finalMsg).replace(/\n/g, '<br>');
+                                }
+                            }
+                            // 卡片区显示简洁成功提示
+                            wrapper.innerHTML = `
+                                <div class="card-success">
+                                    <i class="fas fa-check-circle"></i>
+                                    <p><strong>✅ 操作已完成</strong></p>
+                                </div>`;
+                        } else if (data.status === 'interrupted') {
+                            // v10: 后续工单新卡片 — 原地替换为新产品卡片
+                            const newCards = data.cards || [];
+                            if (newCards.length > 0) {
+                                wrapper.innerHTML = '';
+                                newCards.forEach(c => {
+                                    const newCardEl = renderConfirmCard(c);
+                                    if (newCardEl) wrapper.appendChild(newCardEl);
+                                });
+                            } else {
+                                // 无新卡片但有消息 → 追加为 bot 消息
+                                if (data.message && data.message.trim()) {
+                                    addBotMessage();
+                                    if (currentBotBubble) {
+                                        currentBotBubble.innerHTML = escapeHtml(data.message).replace(/\n/g, '<br>');
+                                    }
+                                }
+                                wrapper.innerHTML = '<div style="padding:8px;color:var(--text-secondary);">⏳ 继续处理中...</div>';
+                            }
+                        } else {
+                            wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
+                                ❌ ${escapeHtml(data.message || '操作失败')}
+                            </div>`;
+                        }
+                    } else {
+                        const err = await res.json().catch(() => ({}));
+                        wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
+                            ❌ ${err.detail || '操作失败，请重试'}
+                        </div>`;
+                    }
+                } catch (e) {
+                    console.error('Resume error:', e);
+                    wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
+                        ❌ 请求失败：${e.message}
+                    </div>`;
+                }
                 return;
             }
 
@@ -1718,6 +1796,12 @@
                         addOrchStep('classify', trimmed.replace('[FALLBACK]', '').trim());
                         addDebugEntry('event', 'fallback', '兜底模式');
 
+                    // --- v8: Graph frozen by interrupt() — 等待用户确认 ──
+                    } else if (trimmed === '[INTERRUPT]') {
+                        addDebugEntry('event', 'system', '图已冻结 — 等待用户确认');
+                        // 不折叠思考面板 — 等待用户操作后再结束
+                        updateThinking('⏸️ 等待确认卡片...');
+
                     // --- Completion ---
                     } else if (trimmed === '[DONE]') {
                         addDebugEntry('event', 'system', '编排完成');
@@ -1794,6 +1878,8 @@
             currentBotBubble = null;
             currentOrchBlock = null;
             currentOrchSteps = null;
+            currentReactPanel = null;
+            currentReactSteps = null;
         }
     }
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..base.session_manager import SessionManager
 from ..models import Ticket
@@ -171,7 +171,7 @@ class TicketRepository:
 
             for key, value in filtered.items():
                 setattr(ticket, key, value)
-            ticket.updated_at = datetime.utcnow()
+            ticket.updated_at = datetime.now(timezone.utc)
             return True
 
     def update_status(
@@ -194,7 +194,7 @@ class TicketRepository:
 
             if soft_delete:
                 ticket.is_active = 0
-                ticket.updated_at = datetime.utcnow()
+                ticket.updated_at = datetime.now(timezone.utc)
             else:
                 session.delete(ticket)
             return True
@@ -252,7 +252,7 @@ class TicketRepository:
             by_priority = {row[0]: row[1] for row in by_priority_rows}
 
             # 今日新增
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             today_count = base.filter(Ticket.created_at >= today_start).count()
 
             return {

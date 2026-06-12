@@ -164,6 +164,71 @@ async def reset_card_state(chat: ChatRequest):
         )
     return {"status": "ok"}
 
+
+class ResumeRequest(BaseModel):
+    """v8: LangGraph interrupt 恢复请求"""
+    thread_id: str = "web"
+    action: str = "confirm"  # "confirm" | "cancel"
+    feedback: str = ""
+
+
+@router.post("/chat/resume", summary="恢复被 interrupt() 冻结的图 (v8)")
+async def resume_interrupted_graph(req: ResumeRequest):
+    """
+    v8: LangGraph interrupt() 恢复端点。
+
+    前端卡片按钮调用此端点恢复被冻结的图:
+      - action=confirm: 执行建单
+      - action=cancel: 取消操作
+
+    返回 JSON (卡片按钮不需要流式)。
+    """
+    from langgraph.types import Command
+    from agents.graph_workflow import orchestration_runner
+
+    config = {"configurable": {"thread_id": req.thread_id}}
+    decision = {"action": req.action, "feedback": req.feedback}
+
+    logger.info(
+        f"[Resume] thread={req.thread_id}, action={req.action}"
+    )
+
+    try:
+        # 同步 invoke — 卡片按钮不需要流式
+        result = await orchestration_runner.app.ainvoke(
+            Command(resume=decision), config,
+        )
+
+        # 检查是否又产生了新的 interrupt (modify → 新卡片)
+        final_state = orchestration_runner.app.get_state(config)
+        if final_state and final_state.interrupts:
+            # 有新卡片 → 返回卡片数据让前端渲染
+            interrupts = final_state.interrupts
+            cards = []
+            for interrupt_data in interrupts:
+                if isinstance(interrupt_data, dict):
+                    if "cards" in interrupt_data:
+                        cards.extend(interrupt_data["cards"])
+                    elif "card" in interrupt_data:
+                        cards.append(interrupt_data["card"])
+            return {
+                "status": "interrupted",
+                "cards": cards,
+                "message": result.get("final_response", ""),
+            }
+
+        return {
+            "status": "ok",
+            "message": result.get("final_response", ""),
+        }
+    except Exception as e:
+        logger.error(f"[Resume] 恢复失败: {e}")
+        return {
+            "status": "error",
+            "message": f"恢复失败: {e}",
+        }
+
+
 @router.get("/api/agents/list", summary="已注册Agent列表")
 async def list_registered_agents():
     from agents.orchestrator.agent_registry import agent_registry

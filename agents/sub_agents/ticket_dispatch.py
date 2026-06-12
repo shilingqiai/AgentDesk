@@ -318,9 +318,14 @@ class TicketDispatchSubAgent(BaseSubAgent):
         urgency = message.payload.get("urgency", "medium")
         conversation_history = message.payload.get("conversation_history", "")
 
+        # ── v9: DynamicActionAgent 委派支持 ──
+        pre_extracted = message.payload.get("pre_extracted", {})
+        confirmed = message.payload.get("confirmed", False)
+
         self.logger.info(
             f"[TicketDispatch] 处理工单请求 (trace={message.trace_id[:8]}...): "
-            f"task=\"{task[:50]}\""
+            f"task=\"{task[:50]}\", pre_extracted={bool(pre_extracted)}, "
+            f"confirmed={confirmed}"
         )
 
         try:
@@ -328,15 +333,30 @@ class TicketDispatchSubAgent(BaseSubAgent):
             if message.payload.get("pre_checked"):
                 return await self._execute_compliance_check(message)
 
-            # 1. 使用 LLM 提取工单参数（含类型识别）
-            ticket_params = await self._extract_params(
-                user_input, urgency, conversation_history,
-            )
+            # 1. 提取工单参数（LLM 或预提取）
+            if pre_extracted:
+                # ★ v9: DynamicActionAgent 已提取参数，跳过 LLM 调用
+                ticket_params = dict(pre_extracted)
+                # Normalize: ensure category is set
+                if not ticket_params.get("category"):
+                    ticket_params["category"] = ticket_params.get(
+                        "extra", {},
+                    ).get("service_type", "其他") if isinstance(
+                        ticket_params.get("extra"), dict
+                    ) else "其他"
+                ticket_type = ticket_params.get("ticket_type", "it_fault")
+                self.logger.info(
+                    f"[TicketDispatch:pre_extracted] ticket_type={ticket_type}, "
+                    f"title={ticket_params.get('title', '')[:30]}"
+                )
+            else:
+                ticket_params = await self._extract_params(
+                    user_input, urgency, conversation_history,
+                )
+                ticket_type = ticket_params.get("ticket_type", "it_fault")
 
-            ticket_type = ticket_params.get("ticket_type", "it_fault")
-
-            # 1.5 判断是否应该返回确认卡片
-            if self._should_return_card(ticket_type, ticket_params):
+            # 2. 判断是否返回确认卡片（confirmed 时跳过，直接落库）
+            if not confirmed and self._should_return_card(ticket_type, ticket_params):
                 card = await self._build_card(ticket_type, ticket_params, user_input)
                 return AgentMessage.create_response(
                     from_agent=self.agent_id,
@@ -352,14 +372,14 @@ class TicketDispatchSubAgent(BaseSubAgent):
                     success=True,
                 )
 
-            # 2. 构建 payload（扩展字段）
+            # 3. 构建 payload（扩展字段）
             extra_payload = self._build_extra_payload(ticket_type, ticket_params)
 
-            # 2.5 身份信息（从委派消息中提取）
+            # 3.5 身份信息（从委派消息中提取）
             requester_id = message.payload.get("user_id", "") or message.payload.get("user_name", "")
             requester_name = message.payload.get("user_name", "") or requester_id
 
-            # 3. 创建工单（写入 DB）
+            # 4. 创建工单（写入 DB）
             ticket = self.db_router.ticket.add_ticket(
                 ticket_type=ticket_type,
                 title=ticket_params.get("title", user_input[:30]),
@@ -372,8 +392,31 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 payload=extra_payload,
             )
 
-            # 4. 生成用户响应
+            # 5. 生成用户响应
             response = self._build_response(ticket, ticket_type)
+
+            # ★ v9: confirmed 路径 — 精简返回，DynamicActionAgent 会进一步处理
+            if confirmed:
+                return AgentMessage.create_response(
+                    from_agent=self.agent_id,
+                    to_agent=message.from_agent,
+                    payload={
+                        "direct_response": response,
+                        "ticket_id": ticket["id"],
+                        "ticket_number": ticket["ticket_number"],
+                        "ticket_type": ticket_type,
+                        "ticket_summary": ticket["title"],
+                        "status": ticket["status"],
+                        "priority": ticket["priority"],
+                        "executed": True,
+                        "summary": (
+                            f"[{TICKET_TYPE_CONFIG[ticket_type]['label']}] "
+                            f"工单 {ticket['ticket_number']} 已创建"
+                        ),
+                    },
+                    original_message=message,
+                    success=True,
+                )
 
             return AgentMessage.create_response(
                 from_agent=self.agent_id,
@@ -1247,6 +1290,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
             extra = params.get("extra", {})
             service_type = extra.get("service_type", "")
 
+            # ── v9: 资产领用 / 采购申请 → 专用卡片（非会议室预定）──
+            if service_type in ("资产领用", "asset_requisition"):
+                return self._build_asset_requisition_card(params, user_input)
+            if service_type in ("采购申请", "procurement"):
+                return self._build_procurement_card(params, user_input)
+
             # 1. 智能解析时间
             parsed_date, parsed_start, parsed_end, is_explicit_duration = (
                 self._parse_time_expression(user_input, extra)
@@ -1835,6 +1884,114 @@ class TicketDispatchSubAgent(BaseSubAgent):
             },
             "success_message": "工单已创建！",
         }
+
+    # ============================================================
+    # v9: 资产领用 & 采购申请专用卡片
+    # ============================================================
+
+    @staticmethod
+    def _build_asset_requisition_card(params: dict, user_input: str) -> dict:
+        """构建资产领用确认卡片"""
+        extra = params.get("extra", {})
+        items_text = extra.get("items_text", params.get("description", ""))
+
+        # 尝试从 description 中提取物品列表
+        description = params.get("description", user_input)
+        # 构建可读描述
+        desc_lines = [
+            "📦 **设备领用申请**",
+            "",
+            f"**申请物品**：{params.get('title', '设备领用')}",
+        ]
+        if description:
+            desc_lines.append(f"**详情**：{description}")
+
+        return {
+            "type": "confirm",
+            "title": "📦 设备领用",
+            "description": "\n".join(desc_lines),
+            "fields": [
+                {
+                    "key": "title", "label": "申请标题", "type": "text",
+                    "value": params.get("title", "设备领用"),
+                    "required": True,
+                },
+                {
+                    "key": "description", "label": "详细说明", "type": "text",
+                    "value": description,
+                    "required": True,
+                },
+            ],
+            "confirm_text": "确认领用",
+            "confirm_action": "chat",
+            "action": "/api/tickets/",
+            "method": "POST",
+            "body_template": {
+                "user_input": user_input,
+                "ticket_type": "admin",
+                "priority": params.get("priority", "P2"),
+            },
+            "success_message": "领用申请已提交！可在工单管理页面查看进度。",
+            "fallback_url": "/tickets",
+            "fallback_text": "查看工单",
+        }
+
+    @staticmethod
+    def _build_procurement_card(params: dict, user_input: str) -> dict:
+        """构建采购申请确认卡片"""
+        description = params.get("description", user_input)
+        priority = params.get("priority", "P2")
+
+        desc_lines = [
+            "🛒 **采购申请**",
+            "",
+            f"**采购物品**：{params.get('title', '采购申请')}",
+        ]
+        if description:
+            desc_lines.append(f"**详情**：{description}")
+
+        # 采购金额告警
+        alerts = []
+        extra = params.get("extra", {})
+        amount = extra.get("amount", 0)
+        if isinstance(amount, (int, float)) and amount > 5000:
+            alerts.append({
+                "type": "warning",
+                "message": f"⚠️ 金额 ¥{amount:.0f} 超过 5000 元，需经理审批",
+            })
+
+        card = {
+            "type": "confirm",
+            "title": "🛒 采购申请",
+            "description": "\n".join(desc_lines),
+            "fields": [
+                {
+                    "key": "title", "label": "采购标题", "type": "text",
+                    "value": params.get("title", "采购申请"),
+                    "required": True,
+                },
+                {
+                    "key": "description", "label": "详细说明", "type": "text",
+                    "value": description,
+                    "required": True,
+                },
+            ],
+            "confirm_text": "确认采购",
+            "confirm_action": "chat",
+            "action": "/api/tickets/",
+            "method": "POST",
+            "body_template": {
+                "user_input": user_input,
+                "ticket_type": "admin",
+                "priority": priority,
+            },
+            "success_message": "采购申请已提交！审批通过后将进入采购流程。",
+            "fallback_url": "/tickets",
+            "fallback_text": "查看工单",
+        }
+        if alerts:
+            card["alerts"] = alerts
+        return card
 
     async def _extract_params(
         self,
