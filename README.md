@@ -8,19 +8,19 @@
 ```
 用户输入 → Router (语义路由, qwen-mt-flash)
               │
-    ┌─────────┼─────────┐
-    ▼         ▼         ▼
-  fast     action    complex    clarification
- (80%)    (15%)      (5%)       (不确定→反问)
+    ┌─────────┼─────────┬──────────┐
+    ▼         ▼         ▼          ▼
+  fast     dynamic   complex    clarification
+ (30%)    (60%)      (5%)       (不确定→反问)
     │         │         │
     ▼         ▼         ▼
-EnterpriseRAG  TicketDispatch  TaskPlanner
-(FAISS+LLM)  (工单创建+智能卡片)     (多Agent委派)
+EnterpriseRAG  DynamicAction  TaskPlanner
+(FAISS+LLM)  (ReAct自由编排)  (多Agent委派)
 ```
 
-- **fast** — 知识库问答（FAISS 向量检索 + LLM 合成），80% 请求仅需 2 次 LLM 调用
-- **action** — 工单创建与派发，支持智能确认卡片
-- **complex** — 复合指令，多 Agent 协作
+- **fast** — 通用知识库问答（FAISS 向量检索 + LLM 合成），纯政策/流程查询
+- **dynamic** — ReAct 循环自由编排，LLM 自主决定调用哪些工具、以什么顺序、根据中间结果条件判断。支持工单创建、库存查询、请假、报销、会议室预定等全部操作类场景
+- **complex** — 复合指令，多 Agent 协作（已有被 dynamic 逐步替代的趋势）
 - **clarification** — 语义路由不确定时主动反问，不猜测
 
 ## 核心设计
@@ -30,8 +30,10 @@ EnterpriseRAG  TicketDispatch  TaskPlanner
 | Hub & Spoke | Router 一次判定轨道，消除线性流水线的冗余 LLM 调用 |
 | Single Response | 子Agent 不直接回复用户，编排器统一合成 |
 | 语义路由 | Pydantic 结构化输出，confidence < 0.7 触发反问 |
+| ReAct 动态编排 | DynamicActionAgent 自主决定工具调用序列，零硬编码路径 |
 | EnterpriseRAG | 统一知识库 Agent，FAISS 跨领域检索（IT+HR+行政） |
 | 智能确认卡片 | 工单操作不直接执行，弹出预填卡片让用户确认 |
+| 话题感知 | XML 标签隔离对话历史，自动检测话题切换，防上下文污染 |
 | 三层控制 | AI / Hybrid / Deterministic，高风险操作人工审核 |
 | A2A 协议 | Agent 间标准化通信，MessageBus 全链路追踪 |
 
@@ -68,6 +70,7 @@ EnterpriseRAG  TicketDispatch  TaskPlanner
 - **Alpine.js 3.13** CDN 引入，零构建，保留 `python app.py` 单命令启动
 - SSE 流式对话，实时打字效果
 - 确认卡片在聊天气泡中渲染为交互式表单
+- **ReAct 思维链面板** — LLM 每一步 Thought → Act → Observation 实时折叠展示
 
 ## 技术栈
 
@@ -101,10 +104,10 @@ python app.py --mode web --port 8001
 ```
 ├── app.py                        # FastAPI 入口
 ├── agents/
-│   ├── graph_workflow.py         # Hub & Spoke 编排工作流
+│   ├── graph_workflow.py         # Hub & Spoke 编排工作流 (ReAct循环+话题感知)
 │   ├── base_sub_agent.py         # Agent 抽象基类
 │   ├── orchestrator/             # Router, Registry, Planner, Control
-│   ├── sub_agents/               # EnterpriseRAG, TicketDispatch
+│   ├── sub_agents/               # EnterpriseRAG, TicketDispatch, DynamicAction
 │   └── a2a/                      # Agent 间通信协议
 ├── services/                     # KnowledgeService, Embedding
 ├── db/                           # 数据模型 + Repository
@@ -118,7 +121,7 @@ python app.py --mode web --port 8001
 │       ├── meeting_rooms.html    # 会议室管理 SPA
 │       └── tickets.html          # 工单管理 SPA
 ├── integrations/feishu/          # 飞书 Bot
-├── tests/                        # 测试套件 (66 tests)
+├── tests/                        # 测试套件 (90 tests)
 └── config/                       # 模型工厂 + 配置
 ```
 
@@ -141,20 +144,22 @@ python app.py --mode web --port 8001
 ## 流式令牌
 
 ```
-[THINKING] 🔍 正在分析...    → 思考动画
-[ROUTE] 🔍 极速通道         → 轨道判定
-[FAST] 📚 企业知识库检索     → 轨道入口
-[ACTION] 📋 工单操作         → 轨道入口
-[STREAM] 回答文字片段        → 流式打字
-[CARD] {"type":"confirm",...} → 智能确认卡片
-[DONE]                       → 完成
+[THINKING] 🔍 正在分析...     → 思考动画
+[ROUTE] 🔍 极速通道          → 轨道判定
+[REACT] {"event":"thought",...} → ReAct 思维链 (Thought/Act/Observation)
+[FAST] 📚 企业知识库检索      → 轨道入口
+[DYNAMIC] 🧠 ReAct 循环      → 动态编排入口
+[STREAM] 回答文字片段         → 流式打字
+[CARD] {"type":"confirm",...}  → 智能确认卡片
+[INTERRUPT]                    → 等待用户确认卡片
+[DONE]                         → 完成
 ```
 
 ## 测试
 
 ```bash
 pytest tests/ -v
-# 70+ passed
+# 90+ passed
 ```
 
 ## 评估与监控
