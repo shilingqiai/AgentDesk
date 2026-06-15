@@ -145,7 +145,7 @@ async def reset_conversation(chat: ChatRequest):
     from agents.a2a.context_manager import context_manager
     from agents.a2a.message_bus import message_bus
 
-    orchestration_runner.reset(chat.thread_id)
+    await orchestration_runner.reset(chat.thread_id)
     context_manager.clear_context(chat.thread_id)
     message_bus.clear_trace(chat.thread_id)
     return {"status": "reset"}
@@ -157,9 +157,9 @@ async def reset_card_state(chat: ChatRequest):
     from agents.graph_workflow import orchestration_runner
 
     config = {"configurable": {"thread_id": chat.thread_id}}
-    state = orchestration_runner.app.get_state(config)
+    state = await orchestration_runner.app.aget_state(config)
     if state and state.values:
-        orchestration_runner.app.update_state(
+        await orchestration_runner.app.aupdate_state(
             config, {"pending_card_type": ""},
         )
     return {"status": "ok"}
@@ -200,7 +200,7 @@ async def resume_interrupted_graph(req: ResumeRequest):
         )
 
         # 检查是否又产生了新的 interrupt (modify → 新卡片)
-        final_state = orchestration_runner.app.get_state(config)
+        final_state = await orchestration_runner.app.aget_state(config)
         if final_state and final_state.interrupts:
             # 有新卡片 → 返回卡片数据让前端渲染
             interrupts = final_state.interrupts

@@ -3,10 +3,10 @@ DynamicActionAgent — ReAct 循环驱动的自由编排 Agent
 
 思路来自 Anthropic 的 Tool Use 最佳实践和 LangGraph ReAct 模式。
 
-核心改进：
-  旧: Router → action_query → ToolAgent(单次调用) → 返回
-  旧: Router → action_create → TicketDispatch(创建工单) → 返回
-  旧: Router → complex → 硬编码 if leave/expense 分支
+核心改进 (v8: 旧轨道已移除)：
+  旧(v6): Router → action_query → ToolAgent(单次调用) → 返回
+  旧(v6): Router → action_create → TicketDispatch(创建工单) → 返回
+  complex保留: 请假/报销固定DAG（查政策+查余额→合规检查→确认卡片）
 
   新: Router → dynamic → DynamicActionAgent(ReAct 循环):
         Thought → Act → Observation → Thought → Act → ... → Final Answer
@@ -213,7 +213,7 @@ DYNAMIC_ACTION_TOOLS = [
     description=(
         "基于 ReAct 循环的自由编排Agent。拥有全部工具能力，"
         "能自主决定调用哪些工具、以什么顺序调用、根据中间结果做条件判断。"
-        "替代旧的 action_query/action_create/complex 三条硬编码轨道。"
+        "替代旧的 action_query/action_create 轨道。complex 保留用于请假/报销固定 DAG。"
     ),
     capabilities=[
         "react_loop", "dynamic_orchestration", "tool_use",

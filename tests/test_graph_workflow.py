@@ -82,18 +82,11 @@ class TestGraphWorkflow:
         result = route_after_route({"track": "fast"})
         assert result == "fast_track"
 
-    def test_route_after_route_action_query(self):
-        """路由分发：action_query 轨道"""
+    def test_route_after_route_card_lock(self):
+        """路由分发：card_lock 轨道 → action_track"""
         from agents.graph_workflow import route_after_route
 
-        result = route_after_route({"track": "action_query"})
-        assert result == "action_track"
-
-    def test_route_after_route_action_create(self):
-        """路由分发：action_create 轨道"""
-        from agents.graph_workflow import route_after_route
-
-        result = route_after_route({"track": "action_create"})
+        result = route_after_route({"track": "card_lock"})
         assert result == "action_track"
 
     def test_route_after_route_complex(self):
@@ -177,7 +170,7 @@ class TestRespondNode:
         state = create_initial_state("创建高优工单")
         state["final_response"] = "工单已创建"
         state["needs_human_review"] = True
-        state["track"] = "action_create"
+        state["track"] = "dynamic"
 
         result = await respond_node(state)
 
@@ -202,12 +195,13 @@ class TestOrchestrationRunner:
     """编排运行器测试"""
 
     def test_init(self):
-        """验证运行器可正常初始化"""
+        """verify runner initializes (v12: lazy checkpointer, app=None until first use)"""
         from agents.graph_workflow import OrchestrationWorkflowRunner
 
         runner = OrchestrationWorkflowRunner()
         assert runner is not None
-        assert runner.app is not None
+        assert runner.workflow is not None
+        # v12: app is lazily compiled on first run/run_stream call
 
     @pytest.mark.asyncio
     async def test_run_sync(self):
@@ -218,29 +212,27 @@ class TestOrchestrationRunner:
         runner = OrchestrationWorkflowRunner()
         assert runner.workflow is not None
 
-    def test_get_state(self):
-        """获取会话状态 — 新会话可能返回 None 或空 StateSnapshot"""
+    @pytest.mark.asyncio
+    async def test_get_state(self):
+        """get state -- new session returns empty Snapshot"""
         from agents.graph_workflow import OrchestrationWorkflowRunner
 
         runner = OrchestrationWorkflowRunner()
-        state = runner.get_state("nonexistent-thread-xyz-123")
-        # SqliteSaver 返回空 StateSnapshot，MemorySaver 返回 None
-        # 两者都表示无状态
+        state = await runner.get_state("nonexistent-thread-xyz-123")
+        # AsyncSqliteSaver returns empty StateSnapshot, MemorySaver returns None
         if state is not None:
-            # StateSnapshot 的 values 应为空或默认
             assert state.values == {} or state.next == ()
-            # 或者检查是否有实际消息
             if hasattr(state, 'values') and state.values:
                 messages = state.values.get("messages", [])
                 assert messages == [] or len(messages) == 0
 
-    def test_reset(self):
-        """重置会话"""
+    @pytest.mark.asyncio
+    async def test_reset(self):
+        """reset session"""
         from agents.graph_workflow import OrchestrationWorkflowRunner
 
         runner = OrchestrationWorkflowRunner()
-        # reset 不应报错
-        runner.reset("test-thread")
+        await runner.reset("test-thread")
 
 
 class TestCardLocking:
@@ -256,7 +248,7 @@ class TestCardLocking:
         import asyncio
         result = asyncio.run(route_node(state))
 
-        assert result["track"] == "action_create"
+        assert result["track"] == "card_lock"
         assert result["agent_id"] == "ticket_dispatch"
         assert result["confidence"] == 1.0
         assert result["intent"] == "admin"
@@ -272,7 +264,7 @@ class TestCardLocking:
         import asyncio
         result = asyncio.run(route_node(state))
 
-        assert result["track"] == "action_create"
+        assert result["track"] == "card_lock"
         assert result["confidence"] == 1.0
 
     def test_route_node_no_pending_card_routes_normally(self):
@@ -285,9 +277,9 @@ class TestCardLocking:
         import asyncio
         result = asyncio.run(route_node(state))
 
-        # 应该正常路由（通过 Router LLM），不应该被短路到 action
+        # 应该正常路由（通过 Router LLM），不应该被短路到 card_lock
         # 但这里 Router LLM 实际不可用，会 fallback 到 clarify
-        assert result["track"] in ("fast", "action", "complex", "clarify")
+        assert result["track"] in ("fast", "dynamic", "complex", "clarify")
 
     def test_after_action_track_respond(self):
         """re_route=False → 去 respond"""

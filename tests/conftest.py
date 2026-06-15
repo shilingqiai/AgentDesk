@@ -177,3 +177,149 @@ def sample_agent_descriptions():
         "enterprise_rag(企业知识库问答: IT/HR/行政), "
         "ticket_dispatch(工单派发: 创建/查询多类型工单-IT故障/请假/报销/行政)"
     )
+
+
+# ============================================================
+# v2: E2E 测试基础设施
+# ============================================================
+
+class MockToolCall:
+    """模拟 LangChain tool_call — 支持 .get('name') 和 .get('args')"""
+    def __init__(self, name: str, args: dict):
+        self._name = name
+        self._args = args
+
+    def get(self, key, default=None):
+        if key == "name":
+            return self._name
+        if key == "args":
+            return self._args
+        return default
+
+    def __repr__(self):
+        return f"MockToolCall(name={self._name})"
+
+
+def create_sequenced_mock_llm(sequences: list):
+    """
+    创建按序列返回 tool_calls 的 mock LLM。
+
+    Args:
+        sequences: [(tool_calls_list, content_str), ...]
+                   空 tool_calls_list → 最终回答（停止调用工具）
+    示例:
+        sequences = [
+            ([{"name":"check_inventory","args":{"keyword":"鼠标"}}], "checking..."),
+            ([], "库存充足"),
+        ]
+    """
+    mock = AsyncMock()
+    responses = []
+    for tool_calls, content in sequences:
+        resp = MagicMock()
+        resp.content = content
+        # 空列表为 falsy，触发 ReAct 停止
+        if tool_calls:
+            resp.tool_calls = [MockToolCall(tc["name"], tc["args"]) for tc in tool_calls]
+        else:
+            resp.tool_calls = []
+        responses.append(resp)
+    mock.ainvoke = AsyncMock(side_effect=responses)
+    return mock
+
+
+def build_agent_message(user_input: str, user_name: str = "",
+                        trace_id: str = "test-trace-001",
+                        conversation_history: str = ""):
+    """构建 A2A AgentMessage 快捷函数（用于 DynamicActionAgent.execute()）"""
+    from agents.a2a.protocol import AgentMessage
+    return AgentMessage.create_delegation(
+        from_agent="test_harness",
+        to_agent="dynamic_action",
+        payload={
+            "user_input": user_input,
+            "user_name": user_name,
+            "role": "employee",
+            "conversation_history": conversation_history,
+        },
+        trace_id=trace_id,
+    )
+
+
+# ============================================================
+# E2E Fixtures
+# ============================================================
+
+@pytest.fixture
+def in_memory_db_router():
+    """DatabaseRouter 指向内存 SQLite"""
+    from db.db_router import DatabaseRouter
+    router = DatabaseRouter("sqlite:///:memory:")
+    yield router
+    router.close()
+
+
+@pytest.fixture
+def in_memory_ticket_repo():
+    """TicketRepository 指向内存 SQLite"""
+    from db.base.session_manager import SessionManager
+    from db.repositories.ticket_repository import TicketRepository
+    return TicketRepository(SessionManager("sqlite:///:memory:"))
+
+
+@pytest.fixture
+async def seeded_dynamic_agent():
+    """DynamicActionAgent（注入内存 DB + 种子库存）"""
+    from agents.sub_agents.dynamic_action_agent import DynamicActionAgent
+    from db.db_router import DatabaseRouter
+
+    agent = DynamicActionAgent()
+    agent._db_router = DatabaseRouter("sqlite:///:memory:")
+    agent._inventory_seeded = False
+    await agent._ensure_inventory_seeded()
+    return agent
+
+
+# ============================================================
+# 预置 SOP 序列（供工具追踪测试复用）
+# ============================================================
+
+EQUIPMENT_SOP_SEQUENCE = [
+    # Phase 1: 并行信息收集
+    ([
+        {"name": "search_knowledge_base", "args": {"query": "新员工设备领用政策"}},
+        {"name": "check_inventory", "args": {"keyword": "ThinkPad"}},
+        {"name": "check_inventory", "args": {"keyword": "显示器"}},
+        {"name": "check_inventory", "args": {"keyword": "键鼠"}},
+    ], "Phase 1: 并行收集所有信息"),
+    # Phase 2: 合并建单（create_ticket 单独调用，不与其他工具并行）
+    ([
+        {"name": "create_ticket", "args": {
+            "ticket_type": "admin",
+            "title": "新员工设备领用",
+            "description": "ThinkPad X1 Carbon + 显示器 + 键鼠套装",
+            "priority": "P2",
+            "extra": {"service_type": "asset_requisition"},
+        }},
+    ], "Phase 2: 创建设备领用申请"),
+    ([], "已为您创建设备领用申请，请在确认卡片中核对信息后确认。"),
+]
+
+LEAVE_SOP_SEQUENCE = [
+    ([
+        {"name": "check_leave_balance", "args": {"user_name": "张三"}},
+    ], "检查假期余额"),
+    ([
+        {"name": "create_ticket", "args": {
+            "ticket_type": "leave",
+            "title": "年假申请",
+            "description": "申请年假5天",
+            "priority": "P2",
+            "extra": {
+                "leave_type": "年假", "total_days": 5,
+                "start_date": "2026-06-16", "end_date": "2026-06-20",
+            },
+        }},
+    ], "创建请假申请"),
+    ([], "您的年假申请已生成确认卡片，请核对后确认。"),
+]

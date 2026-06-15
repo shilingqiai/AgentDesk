@@ -1768,7 +1768,6 @@
                         setPipelineTrack('dynamic');
                         const dynContent = trimmed.replace('[DYNAMIC]', '').trim();
                         updateThinking(dynContent);
-                        addOrchStep('delegate', dynContent);
                         addDebugEntry('event', 'dynamic_track', dynContent);
 
                     } else if (trimmed.startsWith('[CARD]')) {

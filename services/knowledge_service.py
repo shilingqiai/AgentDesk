@@ -1,6 +1,7 @@
 # services/knowledge_service.py
-# v2 — IndexIDMap 支持真删除 + 反馈机制 + 扩展默认知识库
+# v3 — IndexIDMap 真删除 + 索引磁盘持久化 + 反馈机制
 
+import os
 import numpy as np
 import faiss
 from typing import List, Dict, Tuple, Optional
@@ -10,13 +11,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# FAISS 索引持久化路径
+FAISS_INDEX_PATH = "data/faiss.index"
+
 
 class KnowledgeService:
     """
     知识库服务类 — 向量检索 + 数据库存储 + 反馈
 
-    v2 改进：
-    - FAISS IndexIDMap：支持 remove_ids 真删除，不再依赖伪删除+脏重建
+    v3 改进：
+    - FAISS 索引磁盘持久化（启动 read_index 加载，避免每次从 JSON 重建）
+    - IndexIDMap：支持 remove_ids 真删除
     - 反馈机制：记录用户 help/not-help 反馈
     - 扩展默认知识库：覆盖 IT、请假、报销、行政四大领域
     """
@@ -25,7 +30,6 @@ class KnowledgeService:
         self.db_router = DatabaseRouter(db_path)
         self.db = self.db_router.knowledge
         self.index = None
-        self._index_id_map: dict[int, int] = {}  # doc_id → FAISS 内部位置（兼容）
         self.initialized = False
 
         # 默认知识库内容 — 覆盖 IT、HR/请假、报销、行政
@@ -514,16 +518,46 @@ class KnowledgeService:
                 logger.error(f"添加默认知识失败: {e}")
 
     # ============================================================
-    # FAISS 向量索引 — v2 IndexIDMap
+    # FAISS 向量索引 — v3 IndexIDMap + 磁盘持久化
     # ============================================================
+
+    def _save_index(self):
+        """将 FAISS 索引持久化到磁盘（二进制格式，毫秒级写入）"""
+        if self.index is not None:
+            os.makedirs(os.path.dirname(FAISS_INDEX_PATH) or ".", exist_ok=True)
+            faiss.write_index(self.index, FAISS_INDEX_PATH)
+            logger.debug(f"FAISS 索引已持久化: {FAISS_INDEX_PATH} ({self.index.ntotal} 向量)")
 
     async def _build_vector_index(self):
         """
-        构建向量索引 — 使用 IndexIDMap 支持真删除
+        构建向量索引 — 优先从磁盘加载，避免每次启动从 SQLite JSON 重建。
 
-        IndexIDMap 包装 IndexFlatIP，使 remove_ids() 可用。
+        - 磁盘有有效索引 → read_index 直接加载（毫秒级）
+        - 磁盘无索引或过期 → 从 DB 重建 + write_index 持久化
         """
         try:
+            # ── 优先从磁盘加载 ──
+            if os.path.exists(FAISS_INDEX_PATH):
+                try:
+                    self.index = faiss.read_index(FAISS_INDEX_PATH)
+                    docs_count = self.db.get_documents_count()
+                    if self.index.ntotal == docs_count:
+                        logger.info(
+                            f"从磁盘加载 FAISS 索引: {FAISS_INDEX_PATH} "
+                            f"({self.index.ntotal} 向量, 与 DB 一致)"
+                        )
+                        return
+                    else:
+                        logger.info(
+                            f"磁盘索引 ({self.index.ntotal}) 与 DB ({docs_count}) "
+                            f"不一致，将重建"
+                        )
+                        self.index = None
+                except Exception as e:
+                    logger.warning(f"磁盘索引加载失败: {e}，将重建")
+                    self.index = None
+
+            # ── 从 DB 重建 ──
             documents = self.db.get_all_documents()
             if not documents:
                 logger.warning("没有文档可用于构建索引")
@@ -550,7 +584,6 @@ class KnowledgeService:
                 embeddings_array = np.array(embeddings).astype('float32')
                 dimension = embeddings_array.shape[1]
 
-                # v2: IndexIDMap 包装，支持 remove_ids
                 base_index = faiss.IndexFlatIP(dimension)
                 self.index = faiss.IndexIDMap(base_index)
                 self.index.add_with_ids(
@@ -558,9 +591,11 @@ class KnowledgeService:
                     np.array(doc_ids, dtype=np.int64),
                 )
                 logger.info(
-                    f"构建向量索引完成 (IndexIDMap)，包含 {len(embeddings)} 个向量，"
-                    f"维度={dimension}"
+                    f"从 DB 构建向量索引完成 (IndexIDMap)，"
+                    f"{len(embeddings)} 个向量，维度={dimension}"
                 )
+                # 持久化到磁盘
+                self._save_index()
             else:
                 logger.warning("没有有效的嵌入向量，无法构建索引")
 
@@ -573,6 +608,7 @@ class KnowledgeService:
         增量添加单个向量到 IndexIDMap
 
         IndexIDMap 支持 add_with_ids，每个向量绑定 doc_id 作为外部 ID。
+        添加后自动持久化索引到磁盘。
         """
         if self.index is None:
             await self._build_vector_index()
@@ -581,10 +617,11 @@ class KnowledgeService:
         emb_array = np.array([embedding]).astype('float32')
         id_array = np.array([doc_id], dtype=np.int64)
         self.index.add_with_ids(emb_array, id_array)
+        self._save_index()
         logger.debug(f"增量添加向量: doc_id={doc_id}, index_size={self.index.ntotal}")
 
     async def _remove_from_index(self, doc_id: int):
-        """从索引中删除指定 doc_id 的向量（IndexIDMap 真删除）"""
+        """从索引中删除指定 doc_id 的向量，并持久化"""
         if self.index is None:
             return
 
@@ -594,6 +631,7 @@ class KnowledgeService:
             self.index.remove_ids(id_array)
             n_removed = n_before - self.index.ntotal
             if n_removed > 0:
+                self._save_index()
                 logger.debug(f"从索引删除向量: doc_id={doc_id}, removed={n_removed}")
         except Exception as e:
             logger.warning(f"从索引删除向量失败 (doc_id={doc_id}): {e}")

@@ -4,8 +4,10 @@
 包含知识库、工单、文档反馈、人工审核等模型。
 """
 from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Float, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
+from sqlalchemy.orm import declarative_base
+from datetime import datetime, timezone
+
+_utcnow = lambda: datetime.now(timezone.utc)
 
 Base = declarative_base()
 
@@ -18,8 +20,8 @@ class KnowledgeDocument(Base):
     category = Column(String, nullable=False)
     keywords = Column(JSON, nullable=True)
     embedding = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     is_active = Column(Integer, default=1)
 
 
@@ -51,8 +53,8 @@ class Ticket(Base):
     assigned_to = Column(String(50), nullable=True, default="")
     trace_id = Column(String(50), nullable=True, default="")
     payload = Column(JSON, nullable=True, comment="扩展字段: 请假天数/报销金额/会议室时间等")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     is_active = Column(Integer, default=1)
 
 
@@ -65,7 +67,7 @@ class DocumentFeedback(Base):
     is_helpful = Column(Integer, nullable=False, default=1, comment="1=有帮助 0=无帮助")
     user_id = Column(String(50), nullable=True, default="")
     comment = Column(Text, nullable=True, default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class HumanReviewRecord(Base):
@@ -85,7 +87,7 @@ class HumanReviewRecord(Base):
     decision = Column(String(20), nullable=True, default="")
     reviewer = Column(String(50), nullable=True, default="")
     comment = Column(Text, nullable=True, default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
     decided_at = Column(DateTime, nullable=True)
 
 
@@ -106,7 +108,7 @@ class MeetingRoom(Base):
     status = Column(String(20), nullable=False, default="available",
                     comment="available | maintenance | closed")
     is_active = Column(Integer, default=1)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class MeetingRoomBooking(Base):
@@ -127,7 +129,7 @@ class MeetingRoomBooking(Base):
     description = Column(Text, nullable=True, default="")
     status = Column(String(20), nullable=False, default="confirmed",
                     comment="confirmed | cancelled")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
     is_active = Column(Integer, default=1)
 
 
@@ -150,5 +152,5 @@ class InventoryItem(Base):
     supplier = Column(String(100), nullable=True, default="", comment="供应商")
     description = Column(Text, nullable=True, default="")
     is_active = Column(Integer, default=1)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
