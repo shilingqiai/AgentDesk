@@ -17,7 +17,8 @@ from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
 
 from agents.graph.state import (
-    TicketState, _get_user_text, _build_conversation_context,
+    TicketState, _get_user_text, _build_conversation_context, _generate_rag_topic,
+    _sh_set,
     _generate_rag_topic, _detect_topic_from_history,
 )
 
@@ -150,13 +151,12 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
         }
         # v11: 如果 final answer 是反问（含问号），标记为持续对话
         if "?" in final_answer or "？" in final_answer:
-            state["conversation_phase"] = "self_help_provided"
-            state["last_rag_topic"] = _generate_rag_topic(user_text, final_answer)
-            state["last_rag_summary"] = final_answer[:150]
-            state["last_track_type"] = "dynamic"
+            topic = _generate_rag_topic(user_text, final_answer)
+            _sh_set(state, phase="self_help_provided", topic=topic,
+                    summary=final_answer[:150], track="dynamic")
             logger.info(
                 f"[DynamicAction:v11] 反问结尾 → phase=self_help_provided, "
-                f"topic={state['last_rag_topic']}, last_track=dynamic"
+                f"topic={topic}, last_track=dynamic"
             )
         state["resolved"] = True
         state["dynamic_agent_messages"] = []

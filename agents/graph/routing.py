@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from typing import Literal
-from agents.graph.state import TicketState
+from agents.graph.state import TicketState, _budget_exhausted, _build_budget_degradation_response, _sh_get
 
 logger = logging.getLogger("graph.routing")
 
@@ -49,13 +49,38 @@ def after_re_evaluate(state: TicketState) -> Literal[
     if intent == "escalation":
         return "dynamic_action"
     elif intent == "follow_up":
-        if state.get("last_track_type") == "dynamic":
+        if _sh_get(state, "track") == "dynamic":
             return "dynamic_action"
         return "fast_track"
     elif intent == "new_topic":
         return "route"
     else:  # confirm
         return "respond"
+
+
+def after_budget_gate(state: TicketState) -> Literal[
+    "re_evaluate", "fast_track", "dynamic_action", "action_track",
+    "complex_track", "clarification", "respond",
+]:
+    """
+    预算门控分发 — Token 预算耗尽时短路到降级响应。
+
+    面试要点：这就是 Loop/Cost Engineering 的落地 — 不是无限制烧 Token，
+    而是设置硬性预算上限，归零后强制降级到确定性路径。
+    """
+    from agents.graph.state import _budget_exhausted
+
+    if _budget_exhausted(state):
+        logger.warning(
+            f"[BudgetGate] 预算耗尽: "
+            f"remaining={state.get('token_budget_remaining', 0)}/"
+            f"{state.get('token_budget_total', 10000)}, 短路到降级响应"
+        )
+        state["final_response"] = _build_budget_degradation_response(state)
+        return "respond"
+
+    # 预算充足 — 正常路由
+    return route_after_route(state)
 
 
 def after_action_track(state: TicketState) -> Literal["route", "respond"]:

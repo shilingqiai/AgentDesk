@@ -25,7 +25,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Optional
 
-from agents.a2a.protocol import AgentMessage, AgentRole
+from agents.a2a.protocol import AgentMessage
 
 
 class BaseSubAgent(ABC):
@@ -44,8 +44,8 @@ class BaseSubAgent(ABC):
     # 子类必须设置 agent_id（与 AgentDeclaration 中的一致）
     agent_id: str = ""
 
-    # Agent 角色
-    role: AgentRole = AgentRole.SUB_AGENT
+    # Agent 角色: "orchestrator" | "sub_agent"
+    role: str = "sub_agent"
 
     def __init__(self):
         self.logger = logging.getLogger(f"agent.{self.agent_id}")

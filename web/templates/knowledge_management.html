@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识库管理 — 企业智能服务台</title>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
     <style>
         :root {
             --bg-primary: #f5f6fa;
@@ -32,7 +33,7 @@
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--bg-primary);
-            height: 100vh; display: flex; overflow: hidden; color: var(--text-primary);
+            height: 100vh; display: flex; flex-direction: column; overflow: hidden; color: var(--text-primary);
         }
 
         /* === SIDEBAR === */
@@ -201,6 +202,9 @@
 </head>
 <body>
 
+{% include '_tab_nav.html' %}
+
+<div style="display:flex; flex:1; overflow:hidden;">
 <!-- Sidebar -->
 <aside class="sidebar">
     <div class="sidebar-header">
@@ -301,6 +305,7 @@
         </form>
     </div>
 </div>
+</div><!-- end wrapper -->
 
 <!-- Toast -->
 <div id="toast" class="toast" style="display:none;"></div>

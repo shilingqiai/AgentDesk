@@ -11,6 +11,7 @@ import logging
 from langgraph.config import get_stream_writer
 from agents.graph.state import (
     TicketState, _get_user_text, _build_conversation_context, _generate_rag_topic,
+    _sh_get, _sh_set,
 )
 
 logger = logging.getLogger("graph.nodes.fast")
@@ -29,7 +30,7 @@ async def fast_track_node(state: TicketState) -> TicketState:
     conversation_history = _build_conversation_context(
         state["messages"], summary=state.get("conversation_summary", ""),
     )
-    phase = state.get("conversation_phase", "initial")
+    phase = _sh_get(state, "phase", "initial")
 
     agent_instance = agent_registry.get_agent("enterprise_rag")
     if agent_instance is None:
@@ -56,7 +57,7 @@ async def fast_track_node(state: TicketState) -> TicketState:
         else:
             # v4 follow_up 上下文注入
             if phase == "self_help_provided":
-                topic = state.get("last_rag_topic", "")
+                topic = _sh_get(state, "topic", "")
                 conversation_history = (
                     f"用户对上一轮「{topic}」方案提出了追问。\n{conversation_history}"
                 )
@@ -77,15 +78,13 @@ async def fast_track_node(state: TicketState) -> TicketState:
             "payload": {"direct_response": full_response.strip(), "sources": source_list},
             "error": None,
         }
-        state["conversation_phase"] = "self_help_provided"
-        state["last_rag_topic"] = _generate_rag_topic(user_text, full_response)
-        state["last_rag_summary"] = full_response[:150]
-        state["last_track_type"] = "fast"
+        topic = _generate_rag_topic(user_text, full_response)
+        _sh_set(state, phase="self_help_provided", topic=topic,
+                summary=full_response[:150], track="fast")
         state["resolved"] = True
         logger.info(
             f"[FastTrack] phase → self_help_provided, "
-            f"topic={state['last_rag_topic']}, "
-            f"tokens={len(full_response)}"
+            f"topic={topic}, tokens={len(full_response)}"
         )
 
     except Exception as e:

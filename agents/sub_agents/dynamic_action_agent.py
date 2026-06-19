@@ -396,11 +396,22 @@ class DynamicActionAgent(BaseSubAgent):
         today = datetime.now().strftime("%Y-%m-%d")
         weekday = ["周一","周二","周三","周四","周五","周六","周日"][datetime.now().weekday()]
         user_context = f"Current user: {user_name}." if user_name else ""
+
+        # v14: 用户记忆注入
+        memory_text = ""
+        if user_name:
+            try:
+                from services.user_memory import user_memory_store
+                memory_text = user_memory_store.inject_memory_context(user_name)
+            except Exception:
+                pass
+
         return (
             "You are the enterprise AI service desk Dynamic Action Agent.\n\n"
             f"{user_context}\n"
             f"Today is {today} ({weekday}). Use this for date calculations.\n\n"
-            "## CRITICAL RULES\n\n"
+            + (f"## User Memory\n{memory_text}\n\n" if memory_text else "")
+            + "## CRITICAL RULES\n\n"
             "### Rule 0: PARALLEL TOOL CALLS (MOST IMPORTANT)\n"
             "ALWAYS call multiple independent tools in ONE response to save iterations.\n"
             "Example: search_knowledge_base + check_inventory(laptop) + check_inventory(monitor)\n"
@@ -461,31 +472,86 @@ class DynamicActionAgent(BaseSubAgent):
 
     async def _execute_tool(self, name: str, args: dict) -> str:
         """
-        执行工具并返回字符串结果。
+        执行工具并返回字符串结果（含分层错误处理 + 退避重试）。
 
-        这是 ReAct 循环中的 Observation 部分。
-        每个工具调用都在这里落地，返回 LLM 可理解的自然语言结果。
+        面试要点：Tool Calling 失败处理分四层 —
+          - ValidationError  → 不重试，直接返回修正提示
+          - TransientError   → 指数退避重试 3 次
+          - DependencyError  → 重试 1 次后降级
+          - UnknownError     → 重试 1 次后升级
         """
+        from agents.tools.error_classifier import (
+            classify_error, ToolErrorType,
+            get_retry_config, format_tool_error_response,
+        )
+        import asyncio as _asyncio
+
+        # ── 工具路由映射 ──
+        _tool_map = {
+            "check_inventory": self._tool_check_inventory,
+            "web_search": self._tool_web_search,
+            "check_leave_balance": self._tool_check_leave_balance,
+            "check_ticket_status": self._tool_check_ticket_status,
+            "search_knowledge_base": self._tool_search_knowledge,
+            "search_meeting_rooms": self._tool_search_meeting_rooms,
+            "create_ticket": self._tool_create_ticket,
+        }
+
+        tool_fn = _tool_map.get(name)
+        if tool_fn is None:
+            return json.dumps({"error": True, "error_type": "validation",
+                               "message": f"未知工具: {name}",
+                               "suggestion": "检查可用工具列表"}, ensure_ascii=False)
+
+        # ── 分层重试循环 ──
+        last_error = None
+        last_error_type = ToolErrorType.UNKNOWN
+
         try:
-            if name == "check_inventory":
-                return await self._tool_check_inventory(args)
-            elif name == "web_search":
-                return await self._tool_web_search(args)
-            elif name == "check_leave_balance":
-                return await self._tool_check_leave_balance(args)
-            elif name == "check_ticket_status":
-                return await self._tool_check_ticket_status(args)
-            elif name == "search_knowledge_base":
-                return await self._tool_search_knowledge(args)
-            elif name == "search_meeting_rooms":
-                return await self._tool_search_meeting_rooms(args)
-            elif name == "create_ticket":
-                return await self._tool_create_ticket(args)
-            else:
-                return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+            return await tool_fn(args)
         except Exception as e:
-            logger.error(f"[DynamicAction] 工具 {name} 执行失败: {e}")
-            return json.dumps({"error": str(e), "tool": name}, ensure_ascii=False)
+            last_error_type, _ = classify_error(name, e)
+            config = get_retry_config(last_error_type)
+            last_error = e
+
+            if config["max_retries"] == 0:
+                # Validation 错误 — 不重试
+                logger.warning(
+                    f"[DynamicAction] 工具 {name} 参数错误(不重试): {e}"
+                )
+                return format_tool_error_response(
+                    name, last_error_type, str(e)[:100], retries_used=0,
+                )
+
+            # ── 退避重试 ──
+            for attempt in range(1, config["max_retries"] + 1):
+                delay = config["backoff_base"] * (2 ** (attempt - 1))
+                logger.info(
+                    f"[DynamicAction] 工具 {name} {last_error_type.value}错误，"
+                    f"退避 {delay:.1f}s 后重试 ({attempt}/{config['max_retries']})"
+                )
+                await _asyncio.sleep(delay)
+                try:
+                    return await tool_fn(args)
+                except Exception as retry_e:
+                    last_error = retry_e
+                    # 重试中也可能遇到不同类型的错误
+                    retry_type, _ = classify_error(name, retry_e)
+                    if retry_type == ToolErrorType.VALIDATION:
+                        break  # 变成参数错误就不再重试
+
+            # 重试耗尽
+            logger.error(
+                f"[DynamicAction] 工具 {name} {last_error_type.value}错误，"
+                f"重试 {config['max_retries']} 次后仍失败: {last_error}"
+            )
+            return format_tool_error_response(
+                name, last_error_type, str(last_error)[:100],
+                retries_used=config["max_retries"],
+                fallback_available=(
+                    last_error_type == ToolErrorType.DEPENDENCY
+                ),
+            )
 
     async def _tool_check_inventory(self, args: dict) -> str:
         """
@@ -687,6 +753,17 @@ class DynamicActionAgent(BaseSubAgent):
                 )
             return json.dumps(
                 {"status": "error", "message": "工单服务不可用"},
+                ensure_ascii=False,
+            )
+
+        # ── 身份防御：_last_user_name 为空时拒绝委托 ──
+        if not self._last_user_name or self._last_user_name == "web_user":
+            self.logger.error(
+                "[DynamicAction] _last_user_name 未设置，无法委托 TicketDispatch!"
+            )
+            return json.dumps(
+                {"status": "error",
+                 "message": "用户身份获取失败，请刷新页面重试。"},
                 ensure_ascii=False,
             )
 

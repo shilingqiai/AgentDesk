@@ -62,13 +62,12 @@ class TestRouteNodeState:
         assert result["resolved"] is False
 
     def test_self_help_phase_re_evaluates(self):
-        """conversation_phase='self_help_provided' → track='re_evaluate'"""
+        """self_help phase='self_help_provided' → track='re_evaluate'"""
         from agents.graph.nodes.router import route_node
 
         state = create_initial_state("还是不行", thread_id="test-re-001")
-        state["conversation_phase"] = "self_help_provided"
-        state["last_rag_topic"] = "VPN故障排查"
-        state["last_rag_summary"] = "检查网络连通性..."
+        from agents.graph.state import _sh_set
+        _sh_set(state, phase="self_help_provided", topic="VPN故障排查", summary="检查网络连通性...")
 
         result = asyncio.run(route_node(state))
 
@@ -133,9 +132,10 @@ class TestNodeStateTransitions:
 
     @pytest.mark.asyncio
     async def test_fast_track_sets_conversation_phase(self):
-        """fast_track_node 成功后 → conversation_phase='self_help_provided' + last_track_type='fast'"""
+        """fast_track_node 成功后 → self_help.phase='self_help_provided' + self_help.track='fast'"""
         from agents.graph.nodes.fast import fast_track_node
         from agents.orchestrator.agent_registry import agent_registry
+        from agents.graph.state import _sh_get
 
         rag_agent = agent_registry.get_agent("enterprise_rag")
         if rag_agent is None:
@@ -164,8 +164,8 @@ class TestNodeStateTransitions:
             state = create_initial_state("VPN怎么排查", thread_id="test-fast-phase")
             result = await fast_track_node(state)
 
-        assert result["conversation_phase"] == "self_help_provided"
-        assert result["last_track_type"] == "fast"
+        assert _sh_get(result, "phase") == "self_help_provided"
+        assert _sh_get(result, "track") == "fast"
         assert result["resolved"] is True
         assert "VPN" in result["final_response"]
 
@@ -179,9 +179,9 @@ class TestNodeStateTransitions:
         from agents.graph.nodes.router import re_evaluate_node
 
         state = create_initial_state("试了没用", thread_id="test-re-eval")
-        state["conversation_phase"] = "self_help_provided"
-        state["last_rag_topic"] = "VPN故障排查"
-        state["last_rag_summary"] = "检查网络连通性，确认VPN客户端版本"
+        from agents.graph.state import _sh_set
+        _sh_set(state, phase="self_help_provided", topic="VPN故障排查",
+                summary="检查网络连通性，确认VPN客户端版本")
 
         mock_llm = MagicMock()
         mock_response = MagicMock()
@@ -222,7 +222,7 @@ class TestRoutingFunctions:
 
         state = {
             "agent_results": {"re_evaluate": {"intent": "escalation"}},
-            "last_track_type": "",
+            "self_help": {"phase": "", "topic": "", "summary": "", "track": ""},
         }
         assert after_re_evaluate(state) == "dynamic_action"
 
@@ -235,5 +235,5 @@ class TestRoutingFunctions:
         state["agent_results"]["re_evaluate"]["intent"] = "follow_up"
         assert after_re_evaluate(state) == "fast_track"
 
-        state["last_track_type"] = "dynamic"
+        state["self_help"]["track"] = "dynamic"
         assert after_re_evaluate(state) == "dynamic_action"

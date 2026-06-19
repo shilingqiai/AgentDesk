@@ -276,11 +276,7 @@ async def reset_conversation(thread_id: str) -> dict:
     """重置指定会话的编排状态"""
     orchestration_runner.reset(thread_id)
     # 清理相关上下文
-    from agents.a2a.context_manager import context_manager
-    from agents.a2a.message_bus import message_bus
-
-    context_manager.clear_context(thread_id)
-    message_bus.clear_trace(thread_id)
+    # context_manager / message_bus removed in A2A slim-down
     audit_trail.clear_trace(thread_id)
 
     return {"success": True, "message": f"会话 {thread_id} 已重置"}

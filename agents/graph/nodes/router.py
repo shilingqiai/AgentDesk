@@ -15,6 +15,7 @@ import re
 from agents.graph.state import (
     TicketState, _get_user_text, _build_conversation_context,
     _maybe_compress_history, _reset_self_help_state,
+    _sh_get, _sh_set,
 )
 
 logger = logging.getLogger("graph.nodes.router")
@@ -54,18 +55,45 @@ async def route_node(state: TicketState) -> TicketState:
         return state
 
     # ── 短路 3: self_help_provided 阶段 → re_evaluate ──
-    if state.get("conversation_phase") == "self_help_provided":
+    if _sh_get(state, "phase") == "self_help_provided":
         logger.info(
-            f"[Route] phase=self_help_provided, topic={state.get('last_rag_topic')}, "
+            f"[Route] phase=self_help_provided, topic={_sh_get(state, 'topic')}, "
             f"短路 Router → re_evaluate"
         )
         state["track"] = "re_evaluate"
         state["resolved"] = False
         return state
 
+    # ── 短路 4: 中文短输入模式匹配（LLM 可能误判的极简输入）──
+    user_text = _get_user_text(state)
+    short_input = user_text.strip()
+    if len(short_input) <= 30:
+        import re as _re
+        # 请假: "请假1天" "请3天假" "我要请年假" "休2天"
+        leave_pattern = r'(请假|请\d|休\d|请个假|年假|病假|事假|调休|休假)'
+        if _re.search(leave_pattern, short_input) and not _re.search(r'(政策|流程|规定|怎么|如何|多少|查询|余额)', short_input):
+            logger.info(f"[Route] 模式匹配→请假/报销 complex, input={short_input[:40]}")
+            state["track"] = "complex"
+            state["agent_id"] = ""
+            state["intent"] = "leave_request"
+            state["urgency"] = "medium"
+            state["confidence"] = 0.85
+            state["resolved"] = False
+            return state
+        # 报销: "报销差旅费" "我要报销"
+        expense_pattern = r'(报销|差旅|发票)'
+        if _re.search(expense_pattern, short_input) and not _re.search(r'(政策|流程|规定|怎么|如何|标准|额度)', short_input):
+            logger.info(f"[Route] 模式匹配→报销 complex, input={short_input[:40]}")
+            state["track"] = "complex"
+            state["agent_id"] = ""
+            state["intent"] = "expense_request"
+            state["urgency"] = "medium"
+            state["confidence"] = 0.85
+            state["resolved"] = False
+            return state
+
     # ── 正常 Router 判定 ──
     router = Router()
-    user_text = _get_user_text(state)
 
     # v12: 对话历史压缩 — 超过阈值触发 LLM 递进摘要
     summary = state.get("conversation_summary", "")
@@ -78,6 +106,11 @@ async def route_node(state: TicketState) -> TicketState:
     )
 
     result = await router.route(user_text, agent_descriptions, conversation_history)
+
+    # v13: Token Budget 扣减 — 从 Router 的 LLM 响应中提取实际消耗
+    if router.last_response is not None:
+        from agents.graph.state import _deduct_tokens
+        _deduct_tokens(state, router.last_response)
 
     state["track"] = result.track
     state["agent_id"] = result.agent_id
@@ -109,6 +142,20 @@ async def route_node(state: TicketState) -> TicketState:
 
     logger.info(f"[Route] track={state['track']}, confidence={result.confidence:.0%}, "
                 f"reason={result.reason[:60]}")
+
+    # v14: 审计日志
+    try:
+        from services.audit_log import audit_route
+        audit_route(
+            user=state.get("user_name", ""),
+            trace_id=state.get("thread_id", ""),
+            track=state["track"],
+            confidence=state["confidence"],
+            reason=result.reason,
+        )
+    except Exception:
+        pass
+
     return state
 
 
@@ -125,8 +172,8 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
     from config.model_provider import create_chat_model
 
     user_text = _get_user_text(state)
-    topic = state.get("last_rag_topic", "企业服务")
-    summary = state.get("last_rag_summary", "")[:150]
+    topic = _sh_get(state, "topic", "企业服务")
+    summary = _sh_get(state, "summary", "")[:150]
 
     system_prompt = (
         "你是对话意图分类器。上一轮助手针对「{topic}」提供了方案/完成了操作，用户刚回复了一句话。\n"
@@ -149,7 +196,13 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
         "  例: 上一轮已成功提交请假 → 用户说'帮我给新同事准备入职设备' → new_topic\n\n"
         "**confirm** — 问题已解决\n"
         "  - '好了''可以了''解决了谢谢''原来是我密码错了'\n\n"
-        "注意：一旦判定 new_topic 或 confirm，说明当前上下文已结束，JSON 中不要引用旧方案。"
+        "注意：一旦判定 new_topic 或 confirm，说明当前上下文已结束，JSON 中不要引用旧方案。\n\n"
+        "## 回答质量自评估\n"
+        "在 reason 字段中，额外评估本轮回答质量（一句话）：\n"
+        "  - 信息增量：本次回答相比上次是否有新信息？重复推荐了相同方案？\n"
+        "  - 方案改进：如果上次回答未被采纳，本次是否提供了不同的解决路径？\n"
+        "  - 收敛判断：按当前趋势，问题是在收敛（逐步解）还是在发散（越问越偏）？\n"
+        "  示例 reason：'用户否定了VPN重连方案，本轮提供了防火墙检查的替代路径，问题在收敛'"
     ).replace("{topic}", topic)
 
     try:
@@ -198,7 +251,7 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
 
         elif intent == "follow_up":
             # v11: 根据上一轮轨道决定 follow_up 目标
-            last_track = state.get("last_track_type", "")
+            last_track = _sh_get(state, "track", "")
             if last_track == "dynamic":
                 # 上一轮是 dynamic_action (ReAct slot-filling) → 继续走 dynamic
                 state["track"] = "dynamic"

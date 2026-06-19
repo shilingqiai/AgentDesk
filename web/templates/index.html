@@ -3,1928 +3,326 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>企业智能服务台 — Copilot Studio 多Agent编排</title>
+    <title>企业智能服务台 — AI Agent 演示</title>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css">
     <style>
-        :root {
-            --bg-primary: #f5f6fa;
-            --bg-sidebar: #1a1a2e;
-            --bg-chat: #ffffff;
-            --bg-input: #f0f2f5;
-            --text-primary: #2d3436;
-            --text-secondary: #636e72;
-            --text-sidebar: #dfe6e9;
-            --text-sidebar-muted: #a4b0be;
-            --accent: #6c5ce7;
-            --accent-light: #a29bfe;
-            --success: #00b894;
-            --warning: #fdcb6e;
-            --danger: #e17055;
-            --info: #74b9ff;
-            --border: #e1e4e8;
-            --shadow: 0 2px 8px rgba(0,0,0,0.08);
-            --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
-            --radius: 12px;
-            --radius-sm: 8px;
-            --transition: 0.2s ease;
-        }
-
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: var(--bg-primary);
-            height: 100vh;
-            display: flex;
-            overflow: hidden;
-            color: var(--text-primary);
-        }
-
-        /* ============================================================
-           SIDEBAR
-           ============================================================ */
-        .sidebar {
-            width: 320px;
-            min-width: 320px;
-            background: var(--bg-sidebar);
-            color: var(--text-sidebar);
-            display: flex;
-            flex-direction: column;
-            overflow-y: auto;
-            z-index: 10;
-            transition: transform var(--transition);
-        }
-
-        .sidebar-header {
-            padding: 24px 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
-        }
-
-        .sidebar-title {
-            font-size: 18px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            color: #fff;
-        }
-
-        .sidebar-title i {
-            color: var(--accent-light);
-            font-size: 22px;
-        }
-
-        .sidebar-subtitle {
-            font-size: 12px;
-            color: var(--text-sidebar-muted);
-            margin-top: 6px;
-            padding-left: 32px;
-        }
-
-        /* Identity Selector */
-        .identity-selector {
-            margin-top: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .identity-selector label {
-            font-size: 11px;
-            color: var(--text-sidebar-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-        }
-        .identity-selector select {
-            width: 100%;
-            padding: 8px 10px;
-            border-radius: 6px;
-            border: 1px solid rgba(255,255,255,0.12);
-            background: rgba(255,255,255,0.06);
-            color: #fff;
-            font-size: 13px;
-            font-family: inherit;
-            outline: none;
-            cursor: pointer;
-            transition: border-color 0.2s;
-        }
-        .identity-selector select:focus {
-            border-color: var(--accent);
-        }
-        .identity-selector select option {
-            background: #1a1a2e;
-            color: #fff;
-        }
-        .identity-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 3px 10px;
-            border-radius: 10px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-        .identity-badge.employee {
-            background: rgba(0,184,148,0.15);
-            color: #55efc4;
-        }
-        .identity-badge.admin {
-            background: rgba(253,203,110,0.15);
-            color: #fdcb6e;
-        }
-
-        .sidebar-section {
-            padding: 16px 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .sidebar-section-title {
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 1.5px;
-            color: var(--text-sidebar-muted);
-            margin-bottom: 12px;
-            font-weight: 600;
-        }
-
-        /* Agent Cards in Sidebar */
-        .agent-card {
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: var(--radius-sm);
-            padding: 14px;
-            margin-bottom: 10px;
-            cursor: pointer;
-            transition: all var(--transition);
-            position: relative;
-        }
-
-        .agent-card:hover {
-            background: rgba(255,255,255,0.08);
-            border-color: rgba(255,255,255,0.12);
-            transform: translateX(2px);
-        }
-
-        .agent-card.active {
-            background: rgba(108, 92, 231, 0.15);
-            border-color: var(--accent);
-        }
-
-        .agent-card-header {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 6px;
-        }
-
-        .agent-icon {
-            width: 36px;
-            height: 36px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-            flex-shrink: 0;
-        }
-
-        .agent-icon.it { background: linear-gradient(135deg, #0984e3, #74b9ff); }
-        .agent-icon.ticket { background: linear-gradient(135deg, #e17055, #fab1a0); }
-        .agent-icon.analytics { background: linear-gradient(135deg, #00b894, #55efc4); }
-        .agent-icon.hr { background: linear-gradient(135deg, #6c5ce7, #a29bfe); }
-
-        .agent-name { font-size: 14px; font-weight: 600; color: #fff; }
-        .agent-status {
-            width: 8px; height: 8px; border-radius: 50%;
-            margin-left: auto;
-            flex-shrink: 0;
-        }
-        .agent-status.idle { background: #636e72; }
-        .agent-status.active { background: #00b894; animation: pulse 1.5s infinite; }
-        .agent-status.error { background: #e17055; }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.4; }
-        }
-
-        .agent-desc {
-            font-size: 12px;
-            color: var(--text-sidebar-muted);
-            line-height: 1.4;
-        }
-
-        .agent-caps {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
-            margin-top: 8px;
-        }
-        .agent-cap {
-            font-size: 10px;
-            padding: 2px 8px;
-            border-radius: 10px;
-            background: rgba(255,255,255,0.08);
-            color: var(--text-sidebar-muted);
-        }
-
-        /* Orchestration Pipeline in Sidebar */
-        .pipeline {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        .pipeline-step {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 13px;
-            color: var(--text-sidebar-muted);
-            transition: all var(--transition);
-        }
-
-        .pipeline-step .step-dot {
-            width: 10px; height: 10px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.15);
-            flex-shrink: 0;
-        }
-
-        .pipeline-step.current {
-            color: #fff;
-            background: rgba(108, 92, 231, 0.2);
-        }
-        .pipeline-step.current .step-dot { background: var(--accent-light); }
-        .pipeline-step.done { color: var(--success); }
-        .pipeline-step.done .step-dot { background: var(--success); }
-
-        /* ============================================================
-           MAIN CHAT AREA
-           ============================================================ */
-        .main {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            min-width: 0;
-            background: var(--bg-primary);
-        }
-
-        .topbar {
-            background: var(--bg-chat);
-            padding: 16px 24px;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            box-shadow: var(--shadow);
-        }
-
-        .topbar-left {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .topbar-title {
-            font-size: 16px;
-            font-weight: 600;
-        }
-
-        .topbar-badge {
-            font-size: 11px;
-            padding: 4px 10px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, #6c5ce7, #a29bfe);
-            color: #fff;
-            font-weight: 500;
-        }
-
-        .topbar-actions {
-            display: flex;
-            gap: 8px;
-        }
-
-        .btn {
-            padding: 8px 16px;
-            border-radius: var(--radius-sm);
-            border: 1px solid var(--border);
-            background: var(--bg-chat);
-            cursor: pointer;
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            transition: all var(--transition);
-            color: var(--text-primary);
-        }
-
-        .btn:hover { background: var(--bg-input); }
-        .btn.primary {
-            background: var(--accent);
-            color: #fff;
-            border-color: var(--accent);
-        }
-        .btn.primary:hover { background: #5b4cdb; }
-
-        /* Chat Messages */
-        .chat-area {
-            flex: 1;
-            overflow-y: auto;
-            padding: 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
-
-        /* Welcome Screen */
-        .welcome {
-            text-align: center;
-            padding: 60px 20px;
-        }
-
-        .welcome-icon {
-            font-size: 56px;
-            margin-bottom: 16px;
-            background: linear-gradient(135deg, #6c5ce7, #a29bfe);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .welcome h2 { font-size: 24px; margin-bottom: 8px; }
-        .welcome p { color: var(--text-secondary); max-width: 500px; margin: 0 auto 24px; line-height: 1.6; }
-
-        .quick-actions {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 12px;
-            max-width: 700px;
-            margin: 0 auto;
-        }
-
-        .quick-action {
-            background: var(--bg-chat);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 16px;
-            cursor: pointer;
-            text-align: left;
-            transition: all var(--transition);
-            box-shadow: var(--shadow);
-        }
-
-        .quick-action:hover {
-            border-color: var(--accent);
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-lg);
-        }
-
-        .quick-action i { font-size: 20px; margin-bottom: 8px; }
-        .quick-action .qa-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
-        .quick-action .qa-desc { font-size: 12px; color: var(--text-secondary); }
-
-        /* Message Bubbles */
-        .message {
-            display: flex;
-            gap: 12px;
-            animation: slideUp 0.3s ease;
-        }
-
-        @keyframes slideUp {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .message.user { flex-direction: row-reverse; }
-
-        .msg-avatar {
-            width: 36px; height: 36px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            flex-shrink: 0;
-        }
-        .msg-avatar.bot { background: linear-gradient(135deg, #6c5ce7, #a29bfe); color: #fff; }
-        .msg-avatar.user { background: linear-gradient(135deg, #0984e3, #74b9ff); color: #fff; }
-
-        .msg-content {
-            max-width: 75%;
-            min-width: 100px;
-        }
-
-        .msg-bubble {
-            background: var(--bg-chat);
-            padding: 14px 18px;
-            border-radius: var(--radius);
-            box-shadow: var(--shadow);
-            line-height: 1.6;
-            font-size: 14px;
-            word-wrap: break-word;
-        }
-
-        .message.user .msg-bubble {
-            background: linear-gradient(135deg, #6c5ce7, #a29bfe);
-            color: #fff;
-        }
-
-        /* Orchestration Process in Messages */
-        .orch-block {
-            margin-top: 10px;
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            overflow: hidden;
-            background: #fafbfc;
-        }
-
-        .orch-header {
-            padding: 8px 14px;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--accent);
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            user-select: none;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .orch-header i { transition: transform 0.2s; }
-        .orch-header.collapsed i { transform: rotate(-90deg); }
-
-        .orch-steps {
-            padding: 10px 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .orch-step {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 12px;
-            padding: 6px 10px;
-            border-radius: 6px;
-            background: #fff;
-            border: 1px solid var(--border);
-        }
-
-        .orch-step-icon {
-            width: 24px; height: 24px;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 11px;
-            flex-shrink: 0;
-        }
-
-        .orch-step-icon.classify { background: #dfe6e9; color: #636e72; }
-        .orch-step-icon.plan { background: #ffeaa7; color: #e17055; }
-        .orch-step-icon.delegate { background: #dfe6e9; color: #6c5ce7; }
-        .orch-step-icon.verify { background: #d5f4e6; color: #00b894; }
-        .orch-step-icon.respond { background: #d6eaf8; color: #0984e3; }
-        .orch-step-icon.done { background: #d5f4e6; color: #00b894; }
-
-        .orch-step-text { flex: 1; }
-        .orch-step-duration { color: var(--text-secondary); font-size: 11px; }
-
-        /* Agent Process Indicators */
-        .agent-process {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 12px;
-            font-size: 13px;
-            background: #f8f4ff;
-            border-left: 3px solid var(--accent);
-            margin: 6px 0;
-            border-radius: 0 6px 6px 0;
-        }
-
-        .agent-process i { color: var(--accent); }
-
-        /* Typing / Thinking */
-        .thinking {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 14px 18px;
-            font-size: 14px;
-            color: var(--text-secondary);
-            animation: slideUp 0.3s ease;
-        }
-
-        .thinking-dots { display: flex; gap: 3px; }
-        .thinking-dots span {
-            width: 6px; height: 6px;
-            border-radius: 50%;
-            background: var(--accent);
-            animation: bounce 1.2s infinite ease-in-out;
-        }
-        .thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
-        .thinking-dots span:nth-child(3) { animation-delay: 0.3s; }
-
-        @keyframes bounce {
-            0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
-            30% { transform: translateY(-6px); opacity: 1; }
-        }
-
-        .thinking-text {
-            font-size: 13px;
-            color: var(--accent);
-            font-weight: 500;
-            transition: all 0.3s ease;
-        }
-
-        /* Human Review Card */
-        .review-card {
-            background: #fff3e0;
-            border: 2px solid var(--warning);
-            border-radius: var(--radius);
-            padding: 16px;
-            margin: 8px 0;
-        }
-
-        .review-card h4 { color: #e17055; margin-bottom: 8px; }
-        .review-card p { font-size: 13px; margin-bottom: 12px; }
-        .review-actions { display: flex; gap: 8px; }
-
-        /* Confirmation Card in Chat */
-        .confirm-card {
-            background: #f8f4ff;
-            border: 2px solid var(--accent);
-            border-radius: var(--radius);
-            padding: 20px;
-            margin: 10px 0;
-            animation: slideUp 0.3s ease;
-        }
-        .confirm-card .card-title {
-            font-size: 16px; font-weight: 700; margin-bottom: 6px;
-            color: var(--accent);
-        }
-        .confirm-card .card-desc {
-            font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;
-        }
-        .confirm-card .card-field {
-            margin-bottom: 12px;
-        }
-        .confirm-card .card-field label {
-            display: block; font-size: 12px; font-weight: 600;
-            color: var(--text-secondary); margin-bottom: 4px;
-        }
-        .confirm-card .card-field input,
-        .confirm-card .card-field select {
-            width: 100%; padding: 10px 14px; border: 2px solid var(--border);
-            border-radius: var(--radius-sm); font-size: 14px; font-family: inherit;
-            outline: none; background: #fff; transition: border-color 0.2s;
-        }
-        .confirm-card .card-field input:focus,
-        .confirm-card .card-field select:focus {
-            border-color: var(--accent);
-        }
-        .confirm-card .card-actions {
-            display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end;
-        }
-        .confirm-card .card-actions .btn {
-            padding: 10px 20px; font-size: 14px;
-        }
-        .confirm-card .card-success {
-            text-align: center; padding: 16px; color: var(--success);
-        }
-        .confirm-card .card-success i { font-size: 32px; display: block; margin-bottom: 8px; }
-        .confirm-card .card-fallback {
-            text-align: center; margin-top: 12px; padding-top: 12px;
-            border-top: 1px solid var(--border);
-        }
-        .confirm-card .card-fallback a {
-            color: var(--accent); text-decoration: none; font-size: 13px;
-        }
-        .confirm-card .card-fallback a:hover { text-decoration: underline; }
-        .confirm-card .card-alert {
-            padding: 10px 14px; border-radius: 6px; margin-bottom: 10px;
-            font-size: 13px; display: flex; align-items: flex-start; gap: 8px;
-        }
-        .confirm-card .card-alert.warning {
-            background: #fff3e0; border: 1px solid #ffc107; color: #856404;
-        }
-        .confirm-card .card-alert.info {
-            background: #e3f2fd; border: 1px solid #2196f3; color: #0d47a1;
-        }
-        .confirm-card .card-alert.success {
-            background: #e8f5e9; border: 1px solid #4caf50; color: #1b5e20;
-        }
-        .confirm-card .card-field-hint {
-            font-size: 11px; color: var(--text-secondary); margin-top: 2px;
-        }
-
-        /* ReAct Thinking Chain Panel */
-        .react-panel {
-            margin-top: 10px;
-            border: 1px solid #d6d8db;
-            border-radius: var(--radius-sm);
-            overflow: hidden;
-            background: #fafbfc;
-        }
-        .react-panel .react-header {
-            padding: 8px 14px;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--accent);
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            user-select: none;
-            border-bottom: 1px solid var(--border);
-        }
-        .react-panel .react-header i { transition: transform 0.2s; }
-        .react-panel .react-header.collapsed i { transform: rotate(-90deg); }
-        .react-panel .react-steps {
-            padding: 8px 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-            max-height: 280px;
-            overflow-y: auto;
-            font-size: 12px;
-        }
-        .react-panel .react-step {
-            display: flex;
-            align-items: flex-start;
-            gap: 6px;
-            padding: 3px 0;
-            line-height: 1.5;
-            color: var(--text-secondary);
-        }
-        .react-panel .react-step .react-icon { flex-shrink: 0; width: 18px; text-align: center; }
-        .react-panel .react-step.thought { color: #636e72; font-style: italic; }
-        .react-panel .react-step.tool_call { color: #0984e3; }
-        .react-panel .react-step.tool_result { color: #00b894; }
-
-        /* Debug Panel */
-        .debug-panel {
-            position: fixed;
-            right: 0;
-            top: 0;
-            bottom: 0;
-            width: 400px;
-            background: #1e1e2e;
-            color: #cdd6f4;
-            font-family: 'JetBrains Mono', 'Courier New', monospace;
-            font-size: 12px;
-            overflow-y: auto;
-            padding: 20px;
-            transform: translateX(100%);
-            transition: transform 0.3s ease;
-            z-index: 20;
-            box-shadow: -4px 0 20px rgba(0,0,0,0.3);
-        }
-
-        .debug-panel.open { transform: translateX(0); }
-
-        .debug-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }
-
-        .debug-entry {
-            padding: 6px 0;
-            border-bottom: 1px solid rgba(255,255,255,0.04);
-            line-height: 1.5;
-        }
-
-        .debug-entry .ts { color: #6c7086; }
-        .debug-entry .agent { color: #89b4fa; }
-        .debug-entry .event { color: #a6e3a1; }
-        .debug-entry .error { color: #f38ba8; }
-
-        /* Input Area */
-        .input-area {
-            padding: 16px 24px;
-            background: var(--bg-chat);
-            border-top: 1px solid var(--border);
-            box-shadow: 0 -2px 8px rgba(0,0,0,0.04);
-        }
-
-        .input-wrapper {
-            display: flex;
-            gap: 12px;
-            align-items: flex-end;
-            max-width: 900px;
-            margin: 0 auto;
-        }
-
-        #user-input {
-            flex: 1;
-            padding: 14px 18px;
-            border-radius: var(--radius);
-            border: 2px solid var(--border);
-            font-size: 14px;
-            font-family: inherit;
-            outline: none;
-            resize: none;
-            max-height: 120px;
-            background: var(--bg-input);
-            transition: border-color var(--transition);
-            line-height: 1.5;
-        }
-
-        #user-input:focus {
-            border-color: var(--accent);
-            background: #fff;
-        }
-
-        #send-btn {
-            padding: 14px 24px;
-            border-radius: var(--radius);
-            border: none;
-            background: var(--accent);
-            color: #fff;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all var(--transition);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-shrink: 0;
-        }
-
-        #send-btn:hover { background: #5b4cdb; transform: translateY(-1px); }
-        #send-btn:disabled { background: #a4b0be; cursor: not-allowed; transform: none; }
-
-        .input-hint {
-            font-size: 11px;
-            color: var(--text-secondary);
-            margin-top: 8px;
-            text-align: center;
-        }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 3px; }
-        .sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); }
-
-        /* Mobile Toggle */
-        .mobile-toggle {
-            display: none;
-            position: fixed;
-            top: 12px;
-            left: 12px;
-            z-index: 30;
-            width: 40px; height: 40px;
-            border-radius: 50%;
-            background: var(--bg-sidebar);
-            color: #fff;
-            border: none;
-            font-size: 18px;
-            cursor: pointer;
-            box-shadow: var(--shadow-lg);
-        }
-
-        @media (max-width: 768px) {
-            .sidebar {
-                position: fixed;
-                left: 0; top: 0; bottom: 0;
-                transform: translateX(-100%);
-            }
-            .sidebar.open { transform: translateX(0); }
-            .mobile-toggle { display: flex; align-items: center; justify-content: center; }
-            .msg-content { max-width: 90%; }
+        /* SPA Layout — only layout-specific styles */
+        .spa-shell { display:flex; flex-direction:column; height:100vh; }
+
+        /* Identity Bar */
+        .id-bar {
+            display:flex; align-items:center; gap:6px;
+            padding:10px 16px;
+            background: var(--bg-card); border-bottom:1px solid var(--border);
+            box-shadow: var(--shadow); z-index:20; flex-shrink:0;
+        }
+        .id-bar .id-label { font-size:11px; color:var(--text-secondary); margin-right:8px; text-transform:uppercase; letter-spacing:0.5px; }
+        .id-btn {
+            padding:7px 16px; border-radius:20px; border:2px solid transparent;
+            background: var(--bg-input); cursor:pointer; font-size:13px; font-weight:500;
+            font-family:inherit; transition:all 0.2s; white-space:nowrap;
+        }
+        .id-btn:hover { border-color: var(--accent-light); background: #fff; }
+        .id-btn.active {
+            background: var(--accent); color:#fff; border-color:var(--accent);
+            font-weight:600; box-shadow:0 2px 8px rgba(108,92,231,0.3);
+        }
+        .id-btn.manager.active { background:#e17055; border-color:#e17055; box-shadow:0 2px 8px rgba(225,112,85,0.3); }
+        .id-btn.hr.active { background:#0984e3; border-color:#0984e3; box-shadow:0 2px 8px rgba(9,132,227,0.3); }
+        .id-btn.admin-btn.active { background:#2d3436; border-color:#2d3436; box-shadow:0 2px 8px rgba(45,52,54,0.3); }
+
+        /* Tab Sidebar */
+        .tab-nav {
+            display:flex; flex-direction:column; gap:2px;
+            width:140px; min-width:140px;
+            background:var(--bg-sidebar); padding:12px 8px;
+        }
+        .tab-btn {
+            display:flex; align-items:center; gap:8px;
+            padding:10px 14px; border-radius:8px; border:none;
+            background:transparent; color:var(--text-sidebar-muted);
+            cursor:pointer; font-size:13px; font-family:inherit;
+            transition:all 0.15s; text-align:left; width:100%;
+        }
+        .tab-btn:hover { background:rgba(255,255,255,0.06); color:#fff; }
+        .tab-btn.active { background:rgba(108,92,231,0.2); color:#fff; font-weight:600; }
+
+        /* Content */
+        .tab-content { flex:1; overflow-y:auto; min-width:0; }
+
+        /* Approval badge */
+        .approval-dot {
+            display:inline-block; width:8px; height:8px; border-radius:50%;
+            background:var(--danger); margin-left:auto; animation:pulse 1.5s infinite;
         }
     </style>
 </head>
 <body>
 
-    <!-- Mobile Toggle -->
-    <button class="mobile-toggle" onclick="toggleSidebar()" title="Agent面板">
-        <i class="fas fa-robot"></i>
-    </button>
+<div class="spa-shell" x-data="spaApp()">
 
-    <!-- ============================================================
-         SIDEBAR — Agent Roster & Orchestration Pipeline
-         ============================================================ -->
-    <aside class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div class="sidebar-title">
-                <i class="fas fa-cube"></i>
-                企业智能服务台
-            </div>
-            <div class="sidebar-subtitle">Copilot Studio 多Agent编排</div>
-            <div class="identity-selector">
-                <label><i class="fas fa-user-circle"></i> 当前身份</label>
-                <select id="identity-select" onchange="onIdentityChange()">
-                    <option value="张三">👤 张三 (员工)</option>
-                    <option value="李四">👤 李四 (员工)</option>
-                    <option value="王五">👤 王五 (员工)</option>
-                    <option value="赵六">👤 赵六 (员工)</option>
-                    <option value="管理员">🔸 管理员</option>
-                </select>
-                <div style="margin-top:4px;" id="identity-badge-display"></div>
-            </div>
-        </div>
+    <!-- ═══ Identity Bar ═══ -->
+    <header class="id-bar">
+        <span class="id-label"><i class="fas fa-users"></i> 身份切换</span>
+        <template x-for="id in IDENTITIES" :key="id.key">
+            <button class="id-btn"
+                    :class="{ active: identity === id.key,
+                              manager: id.role === 'manager',
+                              hr: id.role === 'hr',
+                              'admin-btn': id.role === 'admin' }"
+                    @click="switchIdentity(id.key)"
+                    x-text="id.label"></button>
+        </template>
+    </header>
 
-        <!-- Hub & Spoke Routing -->
-        <div class="sidebar-section">
-            <div class="sidebar-section-title">Hub & Spoke 五轨道路由</div>
-            <div class="pipeline" id="pipeline">
-                <div class="pipeline-step" data-track="route">
-                    <span class="step-dot"></span> 🔀 智能路由
-                </div>
-                <div class="pipeline-step" data-track="fast">
-                    <span class="step-dot"></span> 📚 极速通道 (政策查询)
-                </div>
-                <div class="pipeline-step" data-track="action_query">
-                    <span class="step-dot"></span> 🔍 数据查询 (个人数据)
-                </div>
-                <div class="pipeline-step" data-track="action_create">
-                    <span class="step-dot"></span> ⚡ 动作通道 (工单操作)
-                </div>
-                <div class="pipeline-step" data-track="complex">
-                    <span class="step-dot"></span> 🧩 复杂通道 (合规申请)
-                </div>
-            </div>
-        </div>
-
-        <!-- Agent Roster -->
-        <div class="sidebar-section">
-            <div class="sidebar-section-title">专业Agent</div>
-            <div id="agent-roster">
-                <!-- Populated by JS -->
-            </div>
-        </div>
-
-        <!-- Quick Links -->
-        <div class="sidebar-section" style="margin-top: auto;">
-            <div class="sidebar-section-title">功能导航</div>
-            <a href="/tickets" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-clipboard-list"></i> 📋 工单管理
-            </a>
-            <a href="/meeting-rooms" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-door-open"></i> 🏢 会议室预定
-            </a>
-            <a href="/knowledge" style="color:var(--text-sidebar-muted);text-decoration:none;display:block;padding:6px 0;font-size:13px;">
-                <i class="fas fa-database"></i> 📚 知识库管理
-            </a>
-        </div>
-    </aside>
-
-    <!-- ============================================================
-         MAIN CHAT AREA
-         ============================================================ -->
-    <div class="main">
-        <!-- Top Bar -->
-        <div class="topbar">
-            <div class="topbar-left">
-                <span class="topbar-title">AI 智能服务台</span>
-                <span class="topbar-badge">Copilot Studio</span>
-            </div>
-            <div class="topbar-actions">
-                <button class="btn" onclick="toggleDebug()" id="debug-btn">
-                    <i class="fas fa-bug"></i> 调试
+    <!-- ═══ Body: Tab Nav + Content ═══ -->
+    <div style="display:flex; flex:1; overflow:hidden;">
+        <!-- Left Tab Nav -->
+        <nav class="tab-nav">
+            <template x-for="tab in visibleTabs" :key="tab.key">
+                <button class="tab-btn"
+                        :class="{ active: activeTab === tab.key }"
+                        @click="switchTab(tab.key)">
+                    <span x-text="tab.label"></span>
+                    <span class="approval-dot" x-show="tab.key === 'approval' && pendingApprovalCount > 0"
+                          :title="pendingApprovalCount + ' 待审批'"></span>
                 </button>
-                <button class="btn" onclick="clearChat()">
-                    <i class="fas fa-trash-alt"></i> 清空
-                </button>
-            </div>
-        </div>
+            </template>
+        </nav>
 
-        <!-- Chat Messages -->
-        <div class="chat-area" id="chat-area">
-            <!-- Welcome Screen -->
-            <div class="welcome" id="welcome">
-                <div class="welcome-icon"><i class="fas fa-robot"></i></div>
-                <h2>您好，我是企业员工AI服务台</h2>
-                <p>由 3 个专业 AI Agent 协同工作：IT 自助排查、HR 政策咨询、行政设施服务。<br>支持飞书 / Web 双渠道接入。</p>
-
-                <div class="quick-actions">
-                    <div class="quick-action" onclick="sendQuickAction('VPN连接失败怎么排查？')">
-                        <i class="fas fa-network-wired" style="color:#0984e3;"></i>
-                        <div class="qa-title">🔧 IT 故障排查</div>
-                        <div class="qa-desc">VPN、网络、系统故障诊断</div>
-                    </div>
-                    <div class="quick-action" onclick="sendQuickAction('请问年假怎么申请？')">
-                        <i class="fas fa-user-tie" style="color:#6c5ce7;"></i>
-                        <div class="qa-title">💼 HR 政策咨询</div>
-                        <div class="qa-desc">请假、福利、入职、报销</div>
-                    </div>
-                    <div class="quick-action" onclick="sendQuickAction('明天下午有空的会议室吗？')">
-                        <i class="fas fa-building" style="color:#00b894;"></i>
-                        <div class="qa-title">🏢 行政设施服务</div>
-                        <div class="qa-desc">会议室、访客、食堂、快递</div>
-                    </div>
-                    <div class="quick-action" onclick="sendQuickAction('公司怎么走？地铁哪个站？')">
-                        <i class="fas fa-map-marker-alt" style="color:#e17055;"></i>
-                        <div class="qa-title">📍 办公导航</div>
-                        <div class="qa-desc">地址、交通、停车场指引</div>
-                    </div>
-                </div>
+        <!-- Right Content Area -->
+        <main class="tab-content" id="tab-content">
+            <!-- Chat Tab -->
+            <div x-show="activeTab === 'chat'" x-transition.opacity.duration.150ms
+                 style="display:flex;flex-direction:column;height:100%;">
+                {% include 'partials/_tab_chat.html' %}
             </div>
-        </div>
 
-        <!-- Input -->
-        <div class="input-area">
-            <div class="input-wrapper">
-                <textarea id="user-input" placeholder="描述您的问题或需求..." rows="1" autocomplete="off"></textarea>
-                <button id="send-btn" onclick="sendMessage()">
-                    <i class="fas fa-paper-plane"></i> 发送
-                </button>
+            <!-- Tickets Tab -->
+            <div x-show="activeTab === 'tickets'" x-transition.opacity.duration.150ms
+                 style="padding:20px;">
+                {% include 'partials/_tab_tickets.html' %}
             </div>
-            <div class="input-hint">Enter 发送 · Shift+Enter 换行 · 3 个 AI Agent 协同处理 · 支持飞书接入</div>
-        </div>
+
+            <!-- Approval Tab -->
+            <div x-show="activeTab === 'approval'" x-transition.opacity.duration.150ms
+                 style="max-width:1100px;margin:0 auto;padding:24px 20px;width:100%;">
+                {% include 'partials/_tab_approval.html' %}
+            </div>
+
+            <!-- Admin Tab -->
+            <div x-show="activeTab === 'admin'" x-transition.opacity.duration.150ms
+                 style="max-width:1100px;margin:0 auto;padding:24px 20px;width:100%;">
+                {% include 'partials/_tab_admin.html' %}
+            </div>
+        </main>
     </div>
+</div>
 
-    <!-- ============================================================
-         DEBUG PANEL
-         ============================================================ -->
-    <div class="debug-panel" id="debug-panel">
-        <div class="debug-header">
-            <span><i class="fas fa-bug"></i> 编排追踪</span>
-            <button class="btn" onclick="toggleDebug()" style="font-size:11px;padding:4px 8px;">关闭</button>
-        </div>
-        <div id="debug-content">
-            <div class="debug-entry" style="color:#6c7086;">等待编排开始...</div>
-        </div>
-    </div>
+<!-- ═══ JS Modules ═══ -->
+<script src="/static/js/app.js?v=20260619d"></script>
+<script src="/static/js/chat.js?v=20260619d"></script>
+<script src="/static/js/ticket.js?v=20260619d"></script>
+<script src="/static/js/approval.js?v=20260619d"></script>
+<script src="/static/js/admin.js?v=20260619d"></script>
 
-    <script>
-    // ============================================================
-    // State
-    // ============================================================
-    const chatArea = document.getElementById('chat-area');
-    const userInput = document.getElementById('user-input');
-    const sendBtn = document.getElementById('send-btn');
-    const welcome = document.getElementById('welcome');
-    const debugPanel = document.getElementById('debug-panel');
-    const debugContent = document.getElementById('debug-content');
-    const threadId = 'web_' + Date.now();
+<!-- ═══ SPA Bootstrap ═══ -->
+<script>
+// Bridge app.js identity into global scope for chat.js compat
+window.currentIdentity = loadIdentity();
+window.getRole = getRole;
+window.THREAD_KEY = THREAD_KEY;
+window.MSG_STORE_KEY = MSG_STORE_KEY;
+window.threadId = getThreadId();
 
-    // ============================================================
-    // Identity Management
-    // ============================================================
-    // 每个身份有固定的角色，不可自由切换
-    const IDENTITY_MAP = {
-        '张三': 'employee',
-        '李四': 'employee',
-        '王五': 'employee',
-        '赵六': 'employee',
-        '管理员': 'admin',
-    };
+document.addEventListener('alpine:init', () => {
+    Alpine.data('spaApp', () => ({
+        identity: window.currentIdentity,
+        activeTab: loadTab(window.currentIdentity),
+        IDENTITIES: IDENTITIES,
+        TABS: TABS,
+        pendingApprovalCount: 0,
+        approvalPollTimer: null,
+        _lastApprovalCount: -1,
 
-    let currentUser = loadIdentity();
+        get visibleTabs() {
+            return getVisibleTabs(this.identity);
+        },
 
-    function loadIdentity() {
-        try {
-            const saved = localStorage.getItem('service_desk_identity');
-            if (saved) {
-                const parsed = JSON.parse(saved);
-                // 确保角色与预设一致
-                parsed.role = IDENTITY_MAP[parsed.user_name] || 'employee';
-                return parsed;
-            }
-        } catch (e) {}
-        return { user_name: '张三', role: 'employee' };
-    }
+        get role() {
+            return getRole(this.identity);
+        },
 
-    function saveIdentity() {
-        localStorage.setItem('service_desk_identity', JSON.stringify(currentUser));
-        updateIdentityUI();
-    }
+        // ============================================================
+        // 身份切换（企业级全量刷新）
+        // ============================================================
+        switchIdentity(key) {
+            const oldIdentity = this.identity;
+            this.identity = key;
+            window.currentIdentity = key;
+            saveIdentity(key);
 
-    function onIdentityChange() {
-        const sel = document.getElementById('identity-select');
-        if (sel) {
-            currentUser.user_name = sel.value;
-            currentUser.role = IDENTITY_MAP[sel.value] || 'employee';
-        }
-        saveIdentity();
-    }
+            // 1. 清除聊天缓存（旧身份的对话不应残留）
+            if (typeof clearStoredMessages === 'function') clearStoredMessages();
 
-    function updateIdentityUI() {
-        const sel = document.getElementById('identity-select');
-        if (sel) sel.value = currentUser.user_name;
-
-        const badge = document.getElementById('identity-badge-display');
-        if (badge) {
-            const roleLabel = currentUser.role === 'admin' ? '管理员' : '员工';
-            const roleClass = currentUser.role === 'admin' ? 'admin' : 'employee';
-            badge.innerHTML = `<span class="identity-badge ${roleClass}">${currentUser.user_name} · ${roleLabel}</span>`;
-        }
-    }
-
-    // Initialize identity UI on load
-    updateIdentityUI();
-    let currentBotBubble = null;
-    let currentOrchBlock = null;
-    let currentOrchSteps = null;
-    let debugEntries = [];
-
-    // ============================================================
-    // Agent Roster (loaded from API)
-    // ============================================================
-    const AGENT_ICONS = {
-        'it_consultant': { icon: 'fa-network-wired', cls: 'it' },
-        'hr_consultant': { icon: 'fa-user-tie', cls: 'hr' },
-        'facilities': { icon: 'fa-building', cls: 'analytics' },
-    };
-
-    async function loadAgentRoster() {
-        try {
-            const res = await fetch('/api/agents/list');
-            const agents = await res.json();
-            const roster = document.getElementById('agent-roster');
-            roster.innerHTML = agents.map(a => {
-                const info = AGENT_ICONS[a.agent_id] || { icon: 'fa-robot', cls: '' };
-                return `
-                <div class="agent-card" data-agent="${a.agent_id}">
-                    <div class="agent-card-header">
-                        <div class="agent-icon ${info.cls}"><i class="fas ${info.icon}"></i></div>
-                        <span class="agent-name">${a.name}</span>
-                        <span class="agent-status idle" id="status-${a.agent_id}"></span>
-                    </div>
-                    <div class="agent-desc">${a.description.substring(0, 80)}...</div>
-                    <div class="agent-caps">
-                        ${a.capabilities.slice(0, 4).map(c => `<span class="agent-cap">${c}</span>`).join('')}
-                    </div>
-                </div>`;
-            }).join('');
-        } catch (e) {
-            console.error('Failed to load agent roster:', e);
-        }
-    }
-
-    function setAgentStatus(agentId, status) {
-        const el = document.getElementById('status-' + agentId);
-        if (el) { el.className = 'agent-status ' + status; }
-
-        // Highlight card
-        document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
-        if (status === 'active') {
-            const card = document.querySelector(`[data-agent="${agentId}"]`);
-            if (card) card.classList.add('active');
-        }
-    }
-
-    function resetAllAgentStatuses() {
-        document.querySelectorAll('.agent-status').forEach(s => {
-            s.className = 'agent-status idle';
-        });
-        document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
-    }
-
-    // ============================================================
-    // Pipeline Visualization — Hub & Spoke
-    // ============================================================
-    function setPipelineTrack(track) {
-        const steps = document.querySelectorAll('.pipeline-step');
-        steps.forEach(s => {
-            s.classList.remove('current', 'done');
-            if (s.dataset.track === track) s.classList.add('current');
-        });
-        // Mark "route" as done once we know the track
-        const routeStep = document.querySelector('[data-track="route"]');
-        if (routeStep && track) routeStep.classList.add('done');
-    }
-
-    function resetPipeline() {
-        document.querySelectorAll('.pipeline-step').forEach(s => {
-            s.classList.remove('current', 'done');
-        });
-    }
-
-    // ============================================================
-    // Debug Panel
-    // ============================================================
-    function addDebugEntry(type, agentId, message) {
-        const now = new Date().toLocaleTimeString();
-        const entry = { ts: now, type, agentId, message };
-        debugEntries.push(entry);
-
-        const cls = type === 'error' ? 'error' : type === 'event' ? 'event' : 'agent';
-        const div = document.createElement('div');
-        div.className = 'debug-entry';
-        div.innerHTML = `<span class="ts">${now}</span> <span class="${cls}">[${agentId}]</span> ${message}`;
-        debugContent.appendChild(div);
-        debugPanel.scrollTop = debugPanel.scrollHeight;
-    }
-
-    function toggleDebug() {
-        const open = debugPanel.classList.toggle('open');
-        document.getElementById('debug-btn').innerHTML = open
-            ? '<i class="fas fa-times"></i> 关闭'
-            : '<i class="fas fa-bug"></i> 调试';
-    }
-
-    // ============================================================
-    // Message Handling
-    // ============================================================
-    function hideWelcome() {
-        if (welcome) welcome.style.display = 'none';
-    }
-
-    function addUserMessage(text) {
-        hideWelcome();
-        const div = document.createElement('div');
-        div.className = 'message user';
-        div.innerHTML = `
-            <div class="msg-content">
-                <div class="msg-bubble">${escapeHtml(text)}</div>
-            </div>
-            <div class="msg-avatar user"><i class="fas fa-user"></i></div>`;
-        chatArea.appendChild(div);
-        scrollToBottom();
-    }
-
-    function addBotMessage() {
-        hideWelcome();
-        const div = document.createElement('div');
-        div.className = 'message bot';
-        const bubble = document.createElement('div');
-        bubble.className = 'msg-bubble';
-        div.innerHTML = '<div class="msg-avatar bot"><i class="fas fa-robot"></i></div><div class="msg-content"></div>';
-        div.querySelector('.msg-content').appendChild(bubble);
-        chatArea.appendChild(div);
-        currentBotBubble = bubble;
-        currentOrchBlock = null;
-        currentOrchSteps = null;
-        return div;
-    }
-
-    function ensureOrchBlock() {
-        if (!currentBotBubble) return;
-        if (!currentOrchBlock) {
-            currentOrchBlock = document.createElement('div');
-            currentOrchBlock.className = 'orch-block';
-            currentOrchBlock.innerHTML = `
-                <div class="orch-header" onclick="toggleOrch(this)">
-                    <i class="fas fa-chevron-down"></i> 编排过程
-                </div>
-                <div class="orch-steps"></div>`;
-            currentBotBubble.appendChild(currentOrchBlock);
-            currentOrchSteps = currentOrchBlock.querySelector('.orch-steps');
-        }
-    }
-
-    function addOrchStep(iconClass, text) {
-        ensureOrchBlock();
-        if (!currentOrchSteps) return;
-        const step = document.createElement('div');
-        step.className = 'orch-step';
-        step.innerHTML = `
-            <div class="orch-step-icon ${iconClass}"><i class="fas fa-check"></i></div>
-            <span class="orch-step-text">${text}</span>`;
-        currentOrchSteps.appendChild(step);
-    }
-
-    function toggleOrch(header) {
-        header.classList.toggle('collapsed');
-        const steps = header.nextElementSibling;
-        if (steps) steps.style.display = steps.style.display === 'none' ? '' : 'none';
-    }
-
-    // ============================================================
-    // ReAct Thinking Chain Panel (防坑2: 滚动锁定 + 完成后自动折叠)
-    // ============================================================
-    let currentReactPanel = null;
-    let currentReactSteps = null;
-
-    function ensureReactPanel() {
-        if (!currentBotBubble) return;
-        if (!currentReactPanel) {
-            currentReactPanel = document.createElement('div');
-            currentReactPanel.className = 'react-panel';
-            currentReactPanel.innerHTML = `
-                <div class="react-header" onclick="toggleReact(this)">
-                    <i class="fas fa-chevron-down"></i> 🧠 思考过程
-                </div>
-                <div class="react-steps"></div>`;
-            // Insert BEFORE any orch-block or text nodes
-            const firstChild = currentBotBubble.firstChild;
-            if (firstChild) {
-                currentBotBubble.insertBefore(currentReactPanel, firstChild);
-            } else {
-                currentBotBubble.appendChild(currentReactPanel);
-            }
-            currentReactSteps = currentReactPanel.querySelector('.react-steps');
-        }
-    }
-
-    function addReactStep(data) {
-        ensureReactPanel();
-        if (!currentReactSteps) return;
-
-        const step = document.createElement('div');
-        const eventType = data.event || '';
-        let icon, text, cls;
-        if (eventType === 'thought') {
-            icon = '💭'; text = data.text || ''; cls = 'thought';
-        } else if (eventType === 'tool_call') {
-            icon = '🔧'; text = data.text || `调用 ${data.tool || '?'}`; cls = 'tool_call';
-        } else if (eventType === 'tool_result') {
-            icon = '✅'; text = data.text || ''; cls = 'tool_result';
-        } else {
-            icon = '·'; text = JSON.stringify(data); cls = '';
-        }
-        step.className = 'react-step ' + cls;
-        step.innerHTML = `<span class="react-icon">${icon}</span><span>${escapeHtml(text)}</span>`;
-        currentReactSteps.appendChild(step);
-
-        // 防坑2: 流式期间强制滚动到底部
-        scrollToBottom();
-    }
-
-    function toggleReact(header) {
-        header.classList.toggle('collapsed');
-        const steps = header.nextElementSibling;
-        if (steps) steps.style.display = steps.style.display === 'none' ? '' : 'none';
-    }
-
-    function collapseReactPanel() {
-        // 防坑2: 流式结束后自动折叠思考面板，节省屏幕空间
-        if (currentReactPanel) {
-            const header = currentReactPanel.querySelector('.react-header');
-            if (header && !header.classList.contains('collapsed')) {
-                header.classList.add('collapsed');
-                const steps = currentReactPanel.querySelector('.react-steps');
-                if (steps) steps.style.display = 'none';
-            }
-        }
-    }
-
-    function addBotText(text) {
-        if (!currentBotBubble) addBotMessage();
-        // Append text node or replace
-        const existing = currentBotBubble.querySelector('.bot-text');
-        if (existing) {
-            existing.textContent += text;
-        } else {
-            const span = document.createElement('span');
-            span.className = 'bot-text';
-            span.textContent = text;
-            currentBotBubble.insertBefore(span, currentBotBubble.firstChild);
-        }
-        scrollToBottom();
-    }
-
-    function showThinking(text) {
-        hideWelcome();
-        const div = document.createElement('div');
-        div.className = 'thinking';
-        div.id = 'thinking-indicator';
-        div.innerHTML = `
-            <div class="thinking-dots"><span></span><span></span><span></span></div>
-            <span class="thinking-text">${escapeHtml(text || 'AI Agent 思考中...')}</span>`;
-        chatArea.appendChild(div);
-        scrollToBottom();
-    }
-
-    function updateThinking(text) {
-        const el = document.getElementById('thinking-indicator');
-        if (el) {
-            const textEl = el.querySelector('.thinking-text');
-            if (textEl) textEl.textContent = text;
-        } else {
-            showThinking(text);
-        }
-        scrollToBottom();
-    }
-
-    function hideThinking() {
-        const el = document.getElementById('thinking-indicator');
-        if (el) {
-            el.style.opacity = '0';
-            el.style.transition = 'opacity 0.25s';
-            setTimeout(() => el.remove(), 250);
-        }
-    }
-
-    function scrollToBottom() {
-        requestAnimationFrame(() => {
-            chatArea.scrollTo({ top: chatArea.scrollHeight, behavior: 'smooth' });
-        });
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    // ============================================================
-    // Confirmation Card Rendering
-    // ============================================================
-
-    function renderConfirmCard(cardData) {
-        if (!cardData || !cardData.type) return null;
-
-        const wrapper = document.createElement('div');
-        wrapper.className = 'confirm-card';
-        wrapper.setAttribute('data-card', JSON.stringify(cardData));
-
-        // Title
-        const title = document.createElement('div');
-        title.className = 'card-title';
-        title.textContent = cardData.title || '确认信息';
-        wrapper.appendChild(title);
-
-        // Alerts (conflict warnings, suggestions)
-        if (cardData.alerts && cardData.alerts.length > 0) {
-            cardData.alerts.forEach(alert => {
-                const alertEl = document.createElement('div');
-                alertEl.className = 'card-alert ' + (alert.type || 'info');
-                alertEl.textContent = alert.message;
-                wrapper.appendChild(alertEl);
-            });
-        }
-
-        // Description (support newlines)
-        if (cardData.description) {
-            const desc = document.createElement('div');
-            desc.className = 'card-desc';
-            desc.innerHTML = cardData.description.replace(/\n/g, '<br>');
-            wrapper.appendChild(desc);
-        }
-
-        // Form fields
-        const fields = cardData.fields || [];
-        const formData = {};
-        fields.forEach(field => {
-            const fg = document.createElement('div');
-            fg.className = 'card-field';
-
-            const label = document.createElement('label');
-            label.textContent = (field.required ? '* ' : '') + (field.label || field.key);
-            fg.appendChild(label);
-
-            let input;
-            if (field.type === 'select' && field.options) {
-                input = document.createElement('select');
-                field.options.forEach(opt => {
-                    const o = document.createElement('option');
-                    o.value = opt.value;
-                    o.textContent = opt.label;
-                    if (opt.value === field.value) o.selected = true;
-                    input.appendChild(o);
-                });
-            } else if (field.type === 'date') {
-                input = document.createElement('input');
-                input.type = 'date';
-                input.value = field.value || '';
-            } else if (field.type === 'number') {
-                input = document.createElement('input');
-                input.type = 'number';
-                input.value = field.value || '';
-                input.min = field.min || 0;
-                if (field.max) input.max = field.max;
-            } else {
-                input = document.createElement('input');
-                input.type = 'text';
-                input.value = field.value || '';
-                if (field.placeholder) input.placeholder = field.placeholder;
-            }
-            input.setAttribute('data-field-key', field.key);
-            input.required = field.required || false;
-            fg.appendChild(input);
-
-            // Field hint
-            if (field.hint) {
-                const hint = document.createElement('div');
-                hint.className = 'card-field-hint';
-                hint.textContent = field.hint;
-                fg.appendChild(hint);
+            // 2. 重置 threadId（新身份 = 新会话）
+            if (typeof resetThreadId === 'function') {
+                window.threadId = resetThreadId();
             }
 
-            formData[field.key] = input;
-            wrapper.appendChild(fg);
-        });
-
-        // Action buttons
-        const actions = document.createElement('div');
-        actions.className = 'card-actions';
-
-        const dismissText = cardData.dismiss_text || '取消';
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'btn';
-        cancelBtn.textContent = dismissText;
-        cancelBtn.onclick = () => {
-            // v8: 动态卡片通过 /chat/resume 取消, 旧卡片通过 /chat/reset-card
-            if (cardData.confirm_action === 'chat') {
-                fetch('/chat/resume', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        thread_id: threadId,
-                        action: 'cancel',
-                    }),
-                }).catch(() => {});
-            } else {
-                // 清除后端卡片锁状态
-                fetch('/chat/reset-card', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        message: '',
-                        thread_id: threadId,
-                        user_name: currentUser.user_name,
-                        role: currentUser.role,
-                    }),
-                }).catch(() => {});
+            // 3. 重设可见 Tab
+            const visible = getVisibleTabs(key);
+            if (!visible.find(t => t.key === this.activeTab)) {
+                this.activeTab = visible[0] ? visible[0].key : 'chat';
             }
-            wrapper.innerHTML = '<div class="card-fallback"><span style="color:var(--text-secondary);">' +
-                (dismissText === '问题已解决' ? '✅ 问题已解决，无需创建工单' : '已取消') +
-                '</span></div>';
-        };
-        actions.appendChild(cancelBtn);
+            saveTab(this.activeTab);
 
-        const confirmBtn = document.createElement('button');
-        confirmBtn.className = 'btn primary';
-        confirmBtn.textContent = cardData.confirm_text || '确认';
-        confirmBtn.onclick = async () => {
-            // Collect form values
-            const values = {};
-            let valid = true;
-            fields.forEach(field => {
-                const el = formData[field.key];
-                const val = el.value.trim();
-                if (field.required && !val) {
-                    el.style.borderColor = 'var(--danger)';
-                    valid = false;
-                } else {
-                    el.style.borderColor = 'var(--border)';
+            // 4. Toast 提示
+            if (oldIdentity !== key) {
+                showToast('已切换为: ' + key, 'info', 2000);
+            }
+
+            // 5. 重启审批轮询
+            this.stopApprovalPolling();
+            this.pendingApprovalCount = 0;
+            this._lastApprovalCount = -1;
+            if (visible.find(t => t.key === 'approval')) {
+                this.startApprovalPolling();
+            }
+
+            // 6. 刷新当前 Tab
+            this.onTabChange();
+
+            // 7. 后台预加载审批计数（即使不在审批 Tab）
+            if (typeof initApprovals === 'function') {
+                initApprovals().catch(() => {});
+            }
+        },
+
+        switchTab(key) {
+            this.activeTab = key;
+            saveTab(key);
+            this.onTabChange();
+        },
+
+        // ============================================================
+        // Tab 切换
+        // ============================================================
+        async onTabChange() {
+            // Small delay for x-show to render DOM
+            await new Promise(r => setTimeout(r, 50));
+
+            if (this.activeTab === 'chat') {
+                if (typeof loadAgentRoster === 'function') loadAgentRoster();
+                if (typeof restoreChatHistory === 'function') restoreChatHistory();
+                const input = document.getElementById('user-input');
+                if (input) input.focus();
+            } else if (this.activeTab === 'tickets') {
+                // Refresh tickets — use window.Alpine.$data for Alpine 3.x compat
+                const el = document.querySelector('[x-data="ticketsApp()"]');
+                let data = null;
+                if (el) {
+                    try { data = window.Alpine.$data(el); } catch (e) {}
+                    if (!data && el._x_dataStack) data = el._x_dataStack[0];
+                    if (!data && el.__x) data = el.__x.$data;
                 }
-                values[field.key] = val;
-            });
-            if (!valid) return;
-
-            // ── v8: LangGraph interrupt() 恢复 (DynamicActionAgent) ──
-            if (cardData.confirm_action === 'chat') {
-                // 防坑3: 禁用同气泡内所有卡片按钮，防止并发竞态
-                const allCards = wrapper.closest('.msg-content')?.querySelectorAll('.confirm-card');
-                allCards?.forEach(c => {
-                    c.querySelectorAll('button').forEach(b => b.disabled = true);
-                });
-
-                confirmBtn.disabled = true;
-                confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-                cancelBtn.disabled = true;
-
-                try {
-                    const res = await fetch('/chat/resume', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            thread_id: threadId,
-                            action: 'confirm',
-                        }),
-                    });
-
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data.status === 'ok') {
-                            // v10: 所有卡片已确认 → 显示 LLM 最终回复到聊天区域
-                            const finalMsg = data.message || cardData.success_message || '操作成功！';
-                            // 把最终回复追加为新 bot 消息
-                            if (finalMsg && finalMsg !== '操作成功！') {
-                                addBotMessage();
-                                if (currentBotBubble) {
-                                    currentBotBubble.innerHTML = escapeHtml(finalMsg).replace(/\n/g, '<br>');
-                                }
-                            }
-                            // 卡片区显示简洁成功提示
-                            wrapper.innerHTML = `
-                                <div class="card-success">
-                                    <i class="fas fa-check-circle"></i>
-                                    <p><strong>✅ 操作已完成</strong></p>
-                                </div>`;
-                        } else if (data.status === 'interrupted') {
-                            // v10: 后续工单新卡片 — 原地替换为新产品卡片
-                            const newCards = data.cards || [];
-                            if (newCards.length > 0) {
-                                wrapper.innerHTML = '';
-                                newCards.forEach(c => {
-                                    const newCardEl = renderConfirmCard(c);
-                                    if (newCardEl) wrapper.appendChild(newCardEl);
-                                });
-                            } else {
-                                // 无新卡片但有消息 → 追加为 bot 消息
-                                if (data.message && data.message.trim()) {
-                                    addBotMessage();
-                                    if (currentBotBubble) {
-                                        currentBotBubble.innerHTML = escapeHtml(data.message).replace(/\n/g, '<br>');
-                                    }
-                                }
-                                wrapper.innerHTML = '<div style="padding:8px;color:var(--text-secondary);">⏳ 继续处理中...</div>';
-                            }
-                        } else {
-                            wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
-                                ❌ ${escapeHtml(data.message || '操作失败')}
-                            </div>`;
-                        }
-                    } else {
-                        const err = await res.json().catch(() => ({}));
-                        wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
-                            ❌ ${err.detail || '操作失败，请重试'}
-                        </div>`;
-                    }
-                } catch (e) {
-                    console.error('Resume error:', e);
-                    wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
-                        ❌ 请求失败：${e.message}
-                    </div>`;
+                if (data && typeof data.loadTickets === 'function') {
+                    data.loadTickets();
+                    data.loadStats();
                 }
-                return;
+            } else if (this.activeTab === 'approval') {
+                if (typeof initApprovals === 'function') await initApprovals();
+            } else if (this.activeTab === 'admin') {
+                if (typeof initAdmin === 'function') await initAdmin();
             }
+        },
 
-            // Build request (旧卡片路径: REST API 直接调用)
-            let actionUrl = cardData.action || '';
-            for (const [k, v] of Object.entries(values)) {
-                actionUrl = actionUrl.replace(`{${k}}`, encodeURIComponent(v));
+        // ============================================================
+        // 审批轮询（15s，仅 manager/hr/admin）
+        // ============================================================
+        startApprovalPolling() {
+            if (this.approvalPollTimer) return;
+            const approver = this.identity;
+            // 首次立即检查
+            this._pollApprovals(approver);
+            // 之后每 15s 轮询
+            this.approvalPollTimer = setInterval(() => this._pollApprovals(approver), 15000);
+        },
+
+        stopApprovalPolling() {
+            if (this.approvalPollTimer) {
+                clearInterval(this.approvalPollTimer);
+                this.approvalPollTimer = null;
             }
+        },
 
-            const method = cardData.method || 'POST';
-            let body;
-            if (cardData.body_template) {
-                body = { ...cardData.body_template };
-                for (const [k, v] of Object.entries(values)) {
-                    body[k] = v;
-                }
-                body.skip_card = true;  // 卡片确认模式：直接创建工单
-            } else {
-                if (actionUrl.includes('/book')) {
-                    body = {
-                        date: values.date || new Date().toISOString().split('T')[0],
-                        start_time: values.start_time || '14:00',
-                        end_time: values.end_time || '15:00',
-                        title: values.title || '会议',
-                        booked_by: values.booked_by || 'web_user',
-                        description: values.description || '',
-                    };
-                } else {
-                    body = values;
-                }
-            }
-
-            // Show loading
-            confirmBtn.disabled = true;
-            confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 处理中...';
-            cancelBtn.disabled = true;
-
+        async _pollApprovals(approver) {
             try {
-                const res = await fetch(actionUrl, {
-                    method: method,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
+                const res = await fetch('/api/approvals/pending?approver=' + encodeURIComponent(approver));
+                const data = await res.json();
+                if (!data.success) return;
+                const items = data.items || [];
+                const actionableCount = items.filter(i => i.actionable !== false).length;
 
-                if (res.ok) {
-                    const data = await res.json();
-                    const fallbackHtml = cardData.fallback_url ? `
-                        <div class="card-fallback">
-                            <a href="${cardData.fallback_url}">
-                                <i class="fas fa-arrow-right"></i> ${cardData.fallback_text || '查看详情'}
-                            </a>
-                        </div>` : '';
-                    wrapper.innerHTML = `
-                        <div class="card-success">
-                            <i class="fas fa-check-circle"></i>
-                            <p><strong>${cardData.success_message || '操作成功！'}</strong></p>
-                        </div>
-                        ${fallbackHtml}
-                    `;
-                } else {
-                    const err = await res.json();
-                    confirmBtn.disabled = false;
-                    cancelBtn.disabled = false;
-                    confirmBtn.textContent = cardData.confirm_text || '确认';
-                    confirmBtn.innerHTML = cardData.confirm_text || '确认';
-                    wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
-                        ❌ ${err.detail || '操作失败，请重试'}
-                    </div>`;
-                }
-            } catch (e) {
-                console.error('Card submit error:', e);
-                wrapper.innerHTML = `<div class="card-fallback" style="color:var(--danger);padding:12px;">
-                    ❌ 请求失败：${e.message}
-                </div>`;
-            }
-        };
-        actions.appendChild(confirmBtn);
-        wrapper.appendChild(actions);
-
-        // Fallback link
-        if (cardData.fallback_url) {
-            const fallback = document.createElement('div');
-            fallback.className = 'card-fallback';
-            fallback.innerHTML = `<a href="${cardData.fallback_url}" target="_blank">
-                <i class="fas fa-external-link-alt"></i> ${cardData.fallback_text || '在新页面打开'}
-            </a>`;
-            wrapper.appendChild(fallback);
-        }
-
-        return wrapper;
-    }
-
-    // ============================================================
-    // Streaming Chat — Hub & Spoke with real-time token streaming
-    // ============================================================
-
-    async function sendMessage(text) {
-        const input = text || userInput.value.trim();
-        if (!input) return;
-
-        userInput.value = '';
-        sendBtn.disabled = true;
-        sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 思考中...';
-
-        addUserMessage(input);
-        resetPipeline();
-        resetAllAgentStatuses();
-        addDebugEntry('event', 'system', `输入: ${input.substring(0, 80)}`);
-
-        // Show simple thinking dots
-        showThinking('AI Agent 思考中...');
-
-        let botBubbleCreated = false;
-        let currentTrack = '';
-
-        try {
-            const res = await fetch('/chat/stream', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message: input,
-                    thread_id: threadId,
-                    user_name: currentUser.user_name,
-                    role: currentUser.role,
-                }),
-            });
-
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
-
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (!trimmed) continue;
-
-                    // --- ReAct thinking chain (dynamic agent real-time reasoning) ---
-                    if (trimmed.startsWith('[REACT]')) {
-                        const reactJson = trimmed.substring(7); // remove "[REACT]"
-                        try {
-                            const reactData = JSON.parse(reactJson);
-                            // First REACT event → hide thinking, create bot bubble
-                            if (!botBubbleCreated) {
-                                hideThinking();
-                                addBotMessage();
-                                botBubbleCreated = true;
-                            }
-                            ensureReactPanel();
-                            addReactStep(reactData);
-                        } catch (e) {
-                            console.error('REACT parse error:', e);
-                        }
-
-                    // --- Real-time stream tokens (token-by-token LLM output) ---
-                    } else if (trimmed.startsWith('[STREAM]')) {
-                        const content = trimmed.substring(8); // remove "[STREAM]"
-                        // First stream token → hide thinking, create bot bubble
-                        if (!botBubbleCreated) {
-                            hideThinking();
-                            addBotMessage();
-                            botBubbleCreated = true;
-                        }
-                        addBotText(content);
-
-                    // --- Thinking state updates ---
-                    } else if (trimmed.startsWith('[THINKING]')) {
-                        const content = trimmed.replace('[THINKING]', '').trim();
-                        updateThinking(content);
-                        addDebugEntry('event', 'thinking', content);
-
-                    // --- Backward compat: old PROGRESS tag → update thinking ---
-                    } else if (trimmed.startsWith('[PROGRESS]')) {
-                        const content = trimmed.replace('[PROGRESS]', '').trim();
-                        updateThinking(content);
-                        addDebugEntry('event', 'progress', content);
-
-                    // --- Route result ---
-                    } else if (trimmed.startsWith('[ROUTE]')) {
-                        const content = trimmed.replace('[ROUTE]', '').trim();
-                        if (content.includes('极速')) currentTrack = 'fast';
-                        else if (content.includes('动作')) currentTrack = 'action';
-                        else if (content.includes('复杂')) currentTrack = 'complex';
-                        else if (content.includes('兜底')) currentTrack = 'fallback';
-                        setPipelineTrack(currentTrack);
-                        addOrchStep('classify', `路由: ${content}`);
-                        addDebugEntry('event', 'router', content);
-
-                    // --- Track entry ---
-                    } else if (trimmed.startsWith('[FAST]')) {
-                        currentTrack = 'fast';
-                        setPipelineTrack('fast');
-                        addOrchStep('classify', trimmed.replace('[FAST]', '').trim());
-                        addDebugEntry('event', 'fast_track', '进入极速通道');
-
-                    } else if (trimmed.startsWith('[ACTION_QUERY]')) {
-                        currentTrack = 'action_query';
-                        setPipelineTrack('action_query');
-                        addOrchStep('query', trimmed.replace('[ACTION_QUERY]', '').trim());
-                        addDebugEntry('event', 'action_query_track', '进入数据查询通道');
-
-                    } else if (trimmed.startsWith('[ACTION]')) {
-                        currentTrack = 'action';
-                        setPipelineTrack('action');
-                        addOrchStep('delegate', trimmed.replace('[ACTION]', '').trim());
-                        addDebugEntry('event', 'action_track', '进入动作通道');
-
-                    } else if (trimmed.startsWith('[COMPLEX]')) {
-                        currentTrack = 'complex';
-                        setPipelineTrack('complex');
-                        addOrchStep('plan', trimmed.replace('[COMPLEX]', '').trim());
-                        addDebugEntry('event', 'complex_track', '进入复杂通道');
-
-                    } else if (trimmed.startsWith('[DYNAMIC]')) {
-                        currentTrack = 'dynamic';
-                        setPipelineTrack('dynamic');
-                        const dynContent = trimmed.replace('[DYNAMIC]', '').trim();
-                        updateThinking(dynContent);
-                        addDebugEntry('event', 'dynamic_track', dynContent);
-
-                    } else if (trimmed.startsWith('[CARD]')) {
-                        // Confirmation card — render interactive form in chat
-                        const cardJson = trimmed.substring(6); // remove "[CARD]"
-                        try {
-                            const cardData = JSON.parse(cardJson);
-                            hideThinking();
-                            if (!botBubbleCreated) {
-                                addBotMessage();
-                                botBubbleCreated = true;
-                            }
-                            const cardEl = renderConfirmCard(cardData);
-                            if (cardEl && currentBotBubble) {
-                                currentBotBubble.appendChild(cardEl);
-                            }
-                            addDebugEntry('event', 'card', '确认卡片: ' + cardData.type);
-                        } catch (e) {
-                            console.error('Card parse error:', e);
-                        }
-
-                    } else if (trimmed.startsWith('[FALLBACK]')) {
-                        currentTrack = 'fallback';
-                        setPipelineTrack('fallback');
-                        addOrchStep('classify', trimmed.replace('[FALLBACK]', '').trim());
-                        addDebugEntry('event', 'fallback', '兜底模式');
-
-                    // --- v8: Graph frozen by interrupt() — 等待用户确认 ──
-                    } else if (trimmed === '[INTERRUPT]') {
-                        addDebugEntry('event', 'system', '图已冻结 — 等待用户确认');
-                        // 不折叠思考面板 — 等待用户操作后再结束
-                        updateThinking('⏸️ 等待确认卡片...');
-
-                    // --- Completion ---
-                    } else if (trimmed === '[DONE]') {
-                        addDebugEntry('event', 'system', '编排完成');
-                        // 防坑2: 流式结束后自动折叠思考面板
-                        collapseReactPanel();
-
-                    // --- Backward compat: old tags ---
-                    } else if (trimmed.startsWith('[ORCHESTRATOR]')) {
-                        const content = trimmed.replace('[ORCHESTRATOR]', '').trim();
-                        updateThinking(content);
-                        addOrchStep('classify', content);
-                        addDebugEntry('event', 'orchestrator', content);
-
-                    } else if (trimmed.startsWith('[AGENT:')) {
-                        const match = trimmed.match(/\[AGENT:([^\]]+)\]\s*(.*)/);
-                        if (match) {
-                            const agentId = match[1], msg = match[2];
-                            setAgentStatus(agentId, 'active');
-                            addOrchStep('delegate', `${agentId}: ${msg}`);
-                            addDebugEntry('agent', agentId, msg);
-                            updateThinking(`${agentId}: ${msg}`);
-                        }
-
-                    } else if (trimmed.startsWith('[DEBUG]')) {
-                        addDebugEntry('event', 'debug', trimmed.replace('[DEBUG]', '').trim());
-
-                    } else if (trimmed.startsWith('[ERROR]')) {
-                        const content = trimmed.replace('[ERROR]', '').trim();
-                        addDebugEntry('error', 'system', content);
-                        updateThinking('❌ ' + content);
-
-                    } else if (trimmed.startsWith('[RESPONSE]')) {
-                        // Backward compat: old RESPONSE marker
-                        hideThinking();
-                        if (!botBubbleCreated) {
-                            addBotMessage();
-                            botBubbleCreated = true;
-                        }
-
-                    } else {
-                        // Unmarked text — treat as response content
-                        if (!botBubbleCreated) {
-                            hideThinking();
-                            addBotMessage();
-                            botBubbleCreated = true;
-                        }
-                        addBotText(trimmed + '\n');
+                // 新增通知（仅当有新的可操作审批时）
+                if (actionableCount > this.pendingApprovalCount && this._lastApprovalCount >= 0) {
+                    const delta = actionableCount - this.pendingApprovalCount;
+                    if (delta > 0) {
+                        showToast('📋 ' + delta + ' 条新审批待处理', 'info', 4000);
                     }
                 }
-            }
+                this._lastApprovalCount = this.pendingApprovalCount;
+                this.pendingApprovalCount = actionableCount;
+            } catch (e) { /* 静默失败 */ }
+        },
 
-            // Finalize
-            hideThinking();
-            resetAllAgentStatuses();
-
-        } catch (error) {
-            hideThinking();
-            console.error('Chat error:', error);
-            if (currentBotBubble) {
-                currentBotBubble.innerHTML = '<span style="color:#e17055;">抱歉，服务暂时不可用，请稍后重试。</span>';
-            } else {
-                addBotMessage();
-                if (currentBotBubble) {
-                    currentBotBubble.innerHTML = '<span style="color:#e17055;">抱歉，服务暂时不可用，请稍后重试。</span>';
+        // ============================================================
+        // 初始化
+        // ============================================================
+        init() {
+            // 监听 approval.js 的 CustomEvent（切到审批 Tab 时同步 badge）
+            window.addEventListener('approval-count', (e) => {
+                if (e.detail) {
+                    this.pendingApprovalCount = e.detail.count || 0;
+                    this._lastApprovalCount = this.pendingApprovalCount;
                 }
+            });
+
+            // 审批角色启动轮询
+            const r = this.role;
+            if (r === 'manager' || r === 'hr' || r === 'admin') {
+                this.startApprovalPolling();
             }
-            addDebugEntry('error', 'system', error.message);
-        } finally {
-            sendBtn.disabled = false;
-            sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i> 发送';
-            userInput.focus();
 
-            if (currentBotBubble) currentBotBubble.removeAttribute('id');
-            currentBotBubble = null;
-            currentOrchBlock = null;
-            currentOrchSteps = null;
-            currentReactPanel = null;
-            currentReactSteps = null;
-        }
+            // 初始化当前可见 Tab
+            this.onTabChange();
+        },
+
+        // 组件销毁时清理
+        destroy() {
+            this.stopApprovalPolling();
+            window.removeEventListener('approval-count', () => {});
+        },
+    }));
+});
+
+// Clean up polling on page unload
+window.addEventListener('beforeunload', () => {
+    const shell = document.querySelector('[x-data="spaApp()"]');
+    if (shell && shell._x_dataStack && shell._x_dataStack[0]) {
+        shell._x_dataStack[0].stopApprovalPolling();
     }
+});
 
-    function sendQuickAction(text) {
-        userInput.value = text;
-        sendMessage(text);
+// Keyboard shortcut for Chat
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey && document.activeElement === document.getElementById('user-input')) {
+        e.preventDefault();
+        if (typeof sendMessage === 'function') sendMessage();
     }
-
-    function clearChat() {
-        const messages = chatArea.querySelectorAll('.message, .thinking');
-        messages.forEach(m => m.remove());
-        if (welcome) welcome.style.display = '';
-        resetPipeline();
-        resetAllAgentStatuses();
-        debugEntries = [];
-        debugContent.innerHTML = '<div class="debug-entry" style="color:#6c7086;">已清空</div>';
-        currentBotBubble = null;
-        currentOrchBlock = null;
-        currentOrchSteps = null;
-        userInput.focus();
-    }
-
-    function toggleSidebar() {
-        document.getElementById('sidebar').classList.toggle('open');
-    }
-
-    // ============================================================
-    // Keyboard & Init
-    // ============================================================
-    userInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    // Auto-resize textarea
-    userInput.addEventListener('input', function() {
-        this.style.height = 'auto';
-        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-    });
-
-    window.addEventListener('load', () => {
-        loadAgentRoster();
-        userInput.focus();
-    });
-    </script>
+});
+</script>
 </body>
 </html>

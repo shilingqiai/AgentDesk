@@ -1,0 +1,55 @@
+<!-- _tab_approval.html — Approval Tab Content (v11: visibility ≠ actionability) -->
+<div>
+    <!-- Stats Row -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="num pending" id="stat-pending">-</div>
+            <div class="label">我的待办</div>
+        </div>
+        <div class="stat-card">
+            <div class="num approved" id="stat-waiting">-</div>
+            <div class="label">等待前置</div>
+        </div>
+        <div class="stat-card">
+            <div class="num total" id="stat-total">-</div>
+            <div class="label">总计</div>
+        </div>
+    </div>
+
+    <!-- ═══ 可操作审批 ═══ -->
+    <div id="actionable-section">
+        <div class="section-title">🔔 待处理 <span class="tag-your-turn" style="font-size:11px;">你的环节</span></div>
+        <div id="actionable-list"></div>
+    </div>
+
+    <!-- ═══ 仅可见审批（等待前置） ═══ -->
+    <div id="visible-only-section" style="display:none;">
+        <div class="section-title" style="color:var(--text-secondary);">👁 等待前置审批 <span style="font-size:11px;color:var(--text-secondary);">仅可见，不可操作</span></div>
+        <div id="visible-only-list"></div>
+    </div>
+
+    <!-- Empty state -->
+    <div class="empty-state" id="empty-state" style="display:none;">
+        <i class="fas fa-check-circle"></i>
+        <h3>没有待处理的审批</h3>
+        <p>所有工单已处理完毕</p>
+    </div>
+
+    <!-- Approval Trail (shared with old popup pattern) -->
+    <div class="trail-section" id="trail-section" style="display:none;">
+        <div class="trail-title">🔍 审批轨迹 — <span id="trail-ticket-number"></span></div>
+        <div class="trail-flow" id="trail-flow"></div>
+    </div>
+</div>
+
+<!-- Reject Modal -->
+<div class="modal-overlay" id="reject-modal" style="display:none;">
+    <div class="modal">
+        <h3>驳回工单</h3>
+        <textarea id="reject-comment" placeholder="驳回理由（可选）..." style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);font-family:inherit;font-size:13px;resize:vertical;min-height:60px;"></textarea>
+        <div class="modal-actions" style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+            <button class="btn" onclick="closeRejectModal()">取消</button>
+            <button class="btn danger" onclick="confirmReject()">确认驳回</button>
+        </div>
+    </div>
+</div>

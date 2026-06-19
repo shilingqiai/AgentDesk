@@ -19,8 +19,12 @@ from langchain_core.messages import AIMessage
 
 from agents.graph.state import (
     TicketState, create_initial_state, _get_user_text,
+    _deduct_tokens, _budget_exhausted, _budget_low,
 )
-from agents.graph.routing import route_after_route, after_re_evaluate, after_action_track
+from agents.graph.routing import (
+    route_after_route, after_re_evaluate, after_action_track,
+    after_budget_gate,
+)
 from agents.graph.streaming import _yield_stream_event
 from agents.graph.nodes.router import route_node, re_evaluate_node
 from agents.graph.nodes.fast import fast_track_node
@@ -158,10 +162,31 @@ async def _classify_dynamic_response(
         return {"action": "confirm", "feedback": ""}
 
 
+async def budget_gate_node(state: TicketState) -> TicketState:
+    """
+    预算门控节点 — 每次经过 route 后检查 Token 预算。
+
+    面试要点：这不是简单的 if 判断，而是架构级的成本控制机制。
+    - 预算充足时透传（零额外延迟）
+    - 预算低下时记录警告日志（可触发告警）
+    - 预算耗尽时由 after_budget_gate 短路到降级响应（零 LLM 调用）
+    """
+    if _budget_low(state):
+        logger.warning(
+            f"[BudgetGate] 预算偏低: "
+            f"remaining={state.get('token_budget_remaining', 0)}/"
+            f"{state.get('token_budget_total', 10000)} "
+            f"({state.get('token_budget_remaining', 0) / max(state.get('token_budget_total', 10000), 1):.0%})"
+        )
+
+    return state
+
+
 def build_orchestration_workflow() -> StateGraph:
     workflow = StateGraph(TicketState)
 
     workflow.add_node("route", route_node)
+    workflow.add_node("budget_gate", budget_gate_node)                # v13: Token 预算门控
     workflow.add_node("re_evaluate", re_evaluate_node)
     workflow.add_node("fast_track", fast_track_node)
     workflow.add_node("dynamic_action", dynamic_action_node)   # v10: ReAct 自由编排
@@ -173,14 +198,16 @@ def build_orchestration_workflow() -> StateGraph:
 
     workflow.set_entry_point("route")
 
-    # route → 六路分发
-    workflow.add_conditional_edges("route", route_after_route, {
+    # route → budget_gate → 预算检查后分发（v13）
+    workflow.add_edge("route", "budget_gate")
+    workflow.add_conditional_edges("budget_gate", after_budget_gate, {
         "re_evaluate": "re_evaluate",
         "fast_track": "fast_track",
         "dynamic_action": "dynamic_action",
         "action_track": "action_track",
         "complex_track": "complex_track",
         "clarification": "clarification",
+        "respond": "respond",  # 预算耗尽时直接短路
     })
 
     # re_evaluate → 五路分发
@@ -255,7 +282,6 @@ class OrchestrationWorkflowRunner:
         try:
             import agents.sub_agents.enterprise_rag     # noqa: F401
             import agents.sub_agents.ticket_dispatch    # noqa: F401
-            import agents.sub_agents.tool_agent         # noqa: F401
             import agents.sub_agents.dynamic_action_agent  # noqa: F401
             import agents.tools.builtin_tools           # noqa: F401
         except ImportError as e:
@@ -272,18 +298,24 @@ class OrchestrationWorkflowRunner:
         # 从 checkpointer 恢复跨 turn 状态
         prev = await asyncio.to_thread(self.app.get_state, config)
         if prev and prev.values:
-            if prev.values.get("conversation_phase") == "self_help_provided":
-                initial_state["conversation_phase"] = "self_help_provided"
-                initial_state["last_rag_topic"] = prev.values.get("last_rag_topic", "")
-                initial_state["last_rag_summary"] = prev.values.get("last_rag_summary", "")
-                initial_state["last_track_type"] = prev.values.get("last_track_type", "")
+            sh = prev.values.get("self_help", {})
+            if not sh:
+                # 兼容旧格式 checkpoint
+                sh = {
+                    "phase": prev.values.get("conversation_phase", "initial"),
+                    "topic": prev.values.get("last_rag_topic", ""),
+                    "summary": prev.values.get("last_rag_summary", ""),
+                    "track": prev.values.get("last_track_type", ""),
+                }
+            if sh.get("phase") == "self_help_provided":
+                initial_state["self_help"] = sh
             if prev.values.get("conversation_summary"):
                 initial_state["conversation_summary"] = prev.values["conversation_summary"]
             if not initial_state["user_name"] and prev.values.get("user_name"):
                 initial_state["user_name"] = prev.values["user_name"]
                 initial_state["role"] = prev.values.get("role", "employee")
             # v12: 恢复 dynamic agent 跨 turn 状态（follow_up 无卡片锁场景）
-            if prev.values.get("last_track_type") == "dynamic":
+            if sh.get("track") == "dynamic":
                 initial_state["dynamic_agent_messages"] = prev.values.get(
                     "dynamic_agent_messages", [],
                 )
@@ -313,24 +345,37 @@ class OrchestrationWorkflowRunner:
                                             user_name=user_name, role=role)
         config = {"configurable": {"thread_id": thread_id}}
 
-        # ── 懒加载 checkpointer + 编译图 ──
-        await self._ensure_app()
+        try:
+            # ── 懒加载 checkpointer + 编译图 ──
+            await self._ensure_app()
 
-        # ── 从 checkpointer 恢复状态 ──
-        prev = await asyncio.to_thread(self.app.get_state, config)
+            # ── 从 checkpointer 恢复状态 ──
+            prev = await asyncio.to_thread(self.app.get_state, config)
+        except Exception as e:
+            logger.error(f"[Stream] 初始化/恢复状态失败: {e}", exc_info=True)
+            yield f"[ERROR] 会话初始化失败: {str(e)[:120]}\n"
+            yield f"[STREAM]抱歉，服务暂时不可用。请刷新页面后重试。\n"
+            yield "[DONE]\n"
+            return
+
         pending_card = ""
         if prev and prev.values:
             pending_card = prev.values.get("pending_card_type", "")
 
-            if prev.values.get("conversation_phase") == "self_help_provided":
-                initial_state["conversation_phase"] = "self_help_provided"
-                initial_state["last_rag_topic"] = prev.values.get("last_rag_topic", "")
-                initial_state["last_rag_summary"] = prev.values.get("last_rag_summary", "")
-                initial_state["last_track_type"] = prev.values.get("last_track_type", "")
+            sh = prev.values.get("self_help", {})
+            if not sh:
+                sh = {
+                    "phase": prev.values.get("conversation_phase", "initial"),
+                    "topic": prev.values.get("last_rag_topic", ""),
+                    "summary": prev.values.get("last_rag_summary", ""),
+                    "track": prev.values.get("last_track_type", ""),
+                }
+            if sh.get("phase") == "self_help_provided":
+                initial_state["self_help"] = sh
                 logger.info(
                     f"[Stream] 恢复 self_help_provided, "
-                    f"topic={initial_state['last_rag_topic']}, "
-                    f"last_track={initial_state['last_track_type']}"
+                    f"topic={sh.get('topic')}, "
+                    f"last_track={sh.get('track')}"
                 )
             if pending_card:
                 prev_agent_results = prev.values.get("agent_results", {})
@@ -349,7 +394,7 @@ class OrchestrationWorkflowRunner:
                         f"{len(initial_state['dynamic_agent_proposals'])} proposals"
                     )
 
-            if prev.values.get("last_track_type") == "dynamic" and not pending_card:
+            if sh.get("track") == "dynamic" and not pending_card:
                 initial_state["dynamic_agent_messages"] = prev.values.get(
                     "dynamic_agent_messages", [],
                 )
@@ -395,34 +440,40 @@ class OrchestrationWorkflowRunner:
                     yield f"[ROUTE] 📋 Processing ({decision.get('action')})...\n"
                     yield "[THINKING] 🔍 Resuming agent...\n"
 
-                    async for event in self.app.astream(
-                        Command(resume=decision), config,
-                        stream_mode=["updates", "custom"],
-                    ):
-                        if isinstance(event, tuple) and len(event) == 2:
-                            mode, data = event
-                            if mode == "custom":
-                                if isinstance(data, str) and (
-                                    data.startswith("[REACT]") or data.startswith("[CARD]")
-                                    or data.startswith("[THINKING]")
-                                ):
-                                    yield f"{data}\n"
-                                else:
-                                    yield f"[STREAM]{data}\n"
-                                continue
-                            elif mode == "updates":
-                                for node_name, node_state in data.items():
+                    try:
+                        async for event in self.app.astream(
+                            Command(resume=decision), config,
+                            stream_mode=["updates", "custom"],
+                        ):
+                            if isinstance(event, tuple) and len(event) == 2:
+                                mode, data = event
+                                if mode == "custom":
+                                    if isinstance(data, str) and (
+                                        data.startswith("[REACT]") or data.startswith("[CARD]")
+                                        or data.startswith("[THINKING]")
+                                    ):
+                                        yield f"{data}\n"
+                                    else:
+                                        yield f"[STREAM]{data}\n"
+                                    continue
+                                elif mode == "updates":
+                                    for node_name, node_state in data.items():
+                                        for _y in _yield_stream_event(node_name, node_state):
+                                            yield _y
+                            else:
+                                for node_name, node_state in event.items():
                                     for _y in _yield_stream_event(node_name, node_state):
                                         yield _y
-                        else:
-                            for node_name, node_state in event.items():
-                                for _y in _yield_stream_event(node_name, node_state):
-                                    yield _y
 
-                    resumed_state = await asyncio.to_thread(self.app.get_state, config)
-                    if resumed_state and resumed_state.interrupts:
-                        yield "[INTERRUPT]\n"
-                    else:
+                        resumed_state = await asyncio.to_thread(self.app.get_state, config)
+                        if resumed_state and resumed_state.interrupts:
+                            yield "[INTERRUPT]\n"
+                        else:
+                            yield "[DONE]\n"
+                    except Exception as e:
+                        logger.error(f"[Stream:resume] 恢复执行失败: {e}", exc_info=True)
+                        yield f"[ERROR] 恢复操作失败: {str(e)[:120]}\n"
+                        yield f"[STREAM]抱歉，操作未能完成。请重试或联系管理员。\n"
                         yield "[DONE]\n"
                     return
 
@@ -439,17 +490,23 @@ class OrchestrationWorkflowRunner:
                 yield f"[ROUTE] 📋 处理您对「{pending_card}」卡片的回复\n"
                 yield "[THINKING] 🔍 正在理解您的意图...\n"
 
-                async for event in self.app.astream(initial_state, config):
-                    for node_name, node_state in event.items():
-                        if node_name == "action_track":
-                            yield "[ACTION] ⚡ 动作通道 · 处理卡片回复\n"
-                            if node_state.get("re_route"):
-                                yield "[ROUTE] 🔄 切换话题，重新分析...\n"
-                                yield "[THINKING] 🔍 正在路由到对应轨道...\n"
-                        for _y in _yield_stream_event(node_name, node_state):
-                            yield _y
+                try:
+                    async for event in self.app.astream(initial_state, config):
+                        for node_name, node_state in event.items():
+                            if node_name == "action_track":
+                                yield "[ACTION] ⚡ 动作通道 · 处理卡片回复\n"
+                                if node_state.get("re_route"):
+                                    yield "[ROUTE] 🔄 切换话题，重新分析...\n"
+                                    yield "[THINKING] 🔍 正在路由到对应轨道...\n"
+                            for _y in _yield_stream_event(node_name, node_state):
+                                yield _y
 
-                yield "[DONE]\n"
+                    yield "[DONE]\n"
+                except Exception as e:
+                    logger.error(f"[Stream:card_lock] 卡片处理失败: {e}", exc_info=True)
+                    yield f"[ERROR] 卡片处理失败: {str(e)[:120]}\n"
+                    yield f"[STREAM]抱歉，操作未能完成。请重试。\n"
+                    yield "[DONE]\n"
                 return
 
         # ================================================================
@@ -457,37 +514,44 @@ class OrchestrationWorkflowRunner:
         # ================================================================
         yield "[THINKING] 🔍 正在分析您的问题...\n"
 
-        async for event in self.app.astream(
-            initial_state, config, stream_mode=["updates", "custom"],
-        ):
-            if isinstance(event, tuple) and len(event) == 2:
-                mode, data = event
-                if mode == "custom":
-                    if isinstance(data, str) and (
-                        data.startswith("[REACT]") or data.startswith("[CARD]")
-                        or data.startswith("[THINKING]")
-                    ):
-                        yield f"{data}\n"
-                    else:
-                        yield f"[STREAM]{data}\n"
-                    continue
-                elif mode == "updates":
-                    for node_name, node_state in data.items():
+        try:
+            async for event in self.app.astream(
+                initial_state, config, stream_mode=["updates", "custom"],
+            ):
+                if isinstance(event, tuple) and len(event) == 2:
+                    mode, data = event
+                    if mode == "custom":
+                        if isinstance(data, str) and (
+                            data.startswith("[REACT]") or data.startswith("[CARD]")
+                            or data.startswith("[THINKING]")
+                        ):
+                            yield f"{data}\n"
+                        else:
+                            yield f"[STREAM]{data}\n"
+                        continue
+                    elif mode == "updates":
+                        for node_name, node_state in data.items():
+                            for _y in _yield_stream_event(node_name, node_state):
+                                yield _y
+                else:
+                    for node_name, node_state in event.items():
                         for _y in _yield_stream_event(node_name, node_state):
                             yield _y
-            else:
-                for node_name, node_state in event.items():
-                    for _y in _yield_stream_event(node_name, node_state):
-                        yield _y
 
-        # v8: 检查 graph 是否被 interrupt() 冻结
-        final_state = await asyncio.to_thread(self.app.get_state, config)
-        if final_state and final_state.interrupts:
-            yield "[INTERRUPT]\n"
-            logger.info(
-                f"[Stream:v8] Graph interrupted — {len(final_state.interrupts)} interrupt(s) pending"
-            )
-        else:
+            # v8: 检查 graph 是否被 interrupt() 冻结
+            final_state = await asyncio.to_thread(self.app.get_state, config)
+            if final_state and final_state.interrupts:
+                yield "[INTERRUPT]\n"
+                logger.info(
+                    f"[Stream:v8] Graph interrupted — {len(final_state.interrupts)} interrupt(s) pending"
+                )
+            else:
+                yield "[DONE]\n"
+
+        except Exception as e:
+            logger.error(f"[Stream] Graph execution failed: {e}", exc_info=True)
+            yield f"[ERROR] 服务暂时不可用，请稍后重试。\n"
+            yield f"[STREAM]抱歉，AI 服务当前不可用。\n\n可能的原因：\n- API 密钥未配置或已过期\n- 模型服务暂时不可用\n- 网络连接问题\n\n请检查配置或稍后重试。\n"
             yield "[DONE]\n"
 
     async def get_state(self, thread_id: str = "default"):
@@ -501,6 +565,26 @@ class OrchestrationWorkflowRunner:
         await self._ensure_app()
         config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
         await asyncio.to_thread(self.app.update_state, config, None)
+
+    async def close(self):
+        """
+        关闭 checkpointer 的 aiosqlite 连接。
+
+        必须在事件循环关闭前调用，否则 Windows ProactorEventLoop
+        会因未关闭的 socket 而卡死 Ctrl+C 关机。
+        """
+        if self.checkpointer is not None:
+            try:
+                # AsyncSqliteSaver 内部持有 aiosqlite 连接
+                # 通过其 .conn 属性访问原生连接并关闭
+                conn = getattr(self.checkpointer, "conn", None)
+                if conn is not None:
+                    await conn.close()
+                    logger.info("AsyncSqliteSaver 数据库连接已关闭")
+            except Exception as e:
+                logger.warning(f"关闭 checkpointer 失败: {e}")
+            self.checkpointer = None
+            self.app = None
 
 
 # 全局实例

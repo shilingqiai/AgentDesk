@@ -52,6 +52,12 @@ class Ticket(Base):
     requester_name = Column(String(50), nullable=True, default="")
     assigned_to = Column(String(50), nullable=True, default="")
     trace_id = Column(String(50), nullable=True, default="")
+    current_approver = Column(String(64), nullable=True, default="",
+                             comment="当前审批人姓名（冗余，方便 tickets 页直接筛选）")
+    approver_chain = Column(JSON, nullable=True,
+                           comment="审批链快照: ['王经理','李HR']")
+    history = Column(JSON, nullable=True,
+                    comment="操作时间线: [{action, by, time, detail}]")
     payload = Column(JSON, nullable=True, comment="扩展字段: 请假天数/报销金额/会议室时间等")
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -131,6 +137,48 @@ class MeetingRoomBooking(Base):
                     comment="confirmed | cancelled")
     created_at = Column(DateTime, default=_utcnow)
     is_active = Column(Integer, default=1)
+
+
+class ApprovalWorkflow(Base):
+    """
+    审批流模型 — 企业审批流程引擎
+
+    每个需要审批的工单生成一条审批流。
+    审批链由确定性规则确定（不经过 LLM），保证合规可审计。
+    """
+    __tablename__ = 'approval_workflows'
+
+    id = Column(Integer, primary_key=True)
+    ticket_id = Column(Integer, ForeignKey('tickets.id'), nullable=False, index=True)
+    workflow_type = Column(String(32), nullable=False, default="leave",
+                         comment="leave | expense | procurement")
+    current_step = Column(Integer, nullable=False, default=0, comment="当前审批节点序号")
+    total_steps = Column(Integer, nullable=False, default=1)
+    status = Column(String(16), nullable=False, default="pending",
+                  comment="pending → approved → rejected")
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class ApprovalStep(Base):
+    """
+    审批节点 — 审批流中的每一步
+
+    每个节点对应一个审批人，按 step_order 顺序执行。
+    """
+    __tablename__ = 'approval_steps'
+
+    id = Column(Integer, primary_key=True)
+    workflow_id = Column(Integer, ForeignKey('approval_workflows.id'), nullable=False, index=True)
+    step_order = Column(Integer, nullable=False, comment="审批顺序: 1, 2, 3...")
+    approver = Column(String(64), nullable=False, comment="审批人")
+    approver_role = Column(String(32), nullable=False, default="",
+                         comment="审批角色: department_manager | hr | finance | vp")
+    status = Column(String(16), nullable=False, default="pending",
+                  comment="pending → approved → rejected")
+    comment = Column(String(500), nullable=True, default="")
+    created_at = Column(DateTime, default=_utcnow)
+    decided_at = Column(DateTime, nullable=True)
 
 
 class InventoryItem(Base):

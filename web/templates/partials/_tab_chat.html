@@ -1,0 +1,73 @@
+<!-- _tab_chat.html — Chat Tab Content -->
+<div style="display:flex; flex:1; overflow:hidden;">
+    <!-- Sidebar: Agent Roster + Pipeline -->
+    <aside class="sidebar" id="sidebar" style="width:280px;min-width:280px;">
+        <div class="sidebar-header">
+            <div class="sidebar-title"><i class="fas fa-cube"></i> 企业智能服务台</div>
+            <div class="sidebar-subtitle">Copilot Studio 多Agent编排</div>
+        </div>
+        <div class="sidebar-section">
+            <div class="sidebar-section-title">Hub & Spoke 五轨道路由</div>
+            <div class="pipeline" id="pipeline">
+                <div class="pipeline-step" data-track="route"><span class="step-dot"></span> 🔀 智能路由</div>
+                <div class="pipeline-step" data-track="fast"><span class="step-dot"></span> 📚 极速通道 (政策查询)</div>
+                <div class="pipeline-step" data-track="action_query"><span class="step-dot"></span> 🔍 数据查询 (个人数据)</div>
+                <div class="pipeline-step" data-track="action_create"><span class="step-dot"></span> ⚡ 动作通道 (工单操作)</div>
+                <div class="pipeline-step" data-track="complex"><span class="step-dot"></span> 🧩 复杂通道 (合规申请)</div>
+            </div>
+        </div>
+        <div class="sidebar-section">
+            <div class="sidebar-section-title">专业Agent</div>
+            <div id="agent-roster"></div>
+        </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <div class="main">
+        <div class="chat-area" id="chat-area">
+            <div class="welcome" id="welcome">
+                <div class="welcome-icon"><i class="fas fa-robot"></i></div>
+                <h2>您好，我是企业员工AI服务台</h2>
+                <p>由 3 个专业 AI Agent 协同工作：IT 自助排查、HR 政策咨询、行政设施服务。<br>支持飞书 / Web 双渠道接入。</p>
+                <div class="quick-actions">
+                    <div class="quick-action" onclick="sendQuickAction('VPN连接失败怎么排查？')">
+                        <i class="fas fa-network-wired" style="color:#0984e3;"></i>
+                        <div class="qa-title">🔧 IT 故障排查</div>
+                        <div class="qa-desc">VPN、网络、系统故障诊断</div>
+                    </div>
+                    <div class="quick-action" onclick="sendQuickAction('请问年假怎么申请？')">
+                        <i class="fas fa-user-tie" style="color:#6c5ce7;"></i>
+                        <div class="qa-title">💼 HR 政策咨询</div>
+                        <div class="qa-desc">请假、福利、入职、报销</div>
+                    </div>
+                    <div class="quick-action" onclick="sendQuickAction('明天下午有空的会议室吗？')">
+                        <i class="fas fa-building" style="color:#00b894;"></i>
+                        <div class="qa-title">🏢 行政设施服务</div>
+                        <div class="qa-desc">会议室、访客、食堂、快递</div>
+                    </div>
+                    <div class="quick-action" onclick="sendQuickAction('公司怎么走？地铁哪个站？')">
+                        <i class="fas fa-map-marker-alt" style="color:#e17055;"></i>
+                        <div class="qa-title">📍 办公导航</div>
+                        <div class="qa-desc">地址、交通、停车场指引</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="input-area">
+            <div class="input-wrapper">
+                <textarea id="user-input" placeholder="描述您的问题或需求..." rows="1" autocomplete="off"></textarea>
+                <button id="send-btn" onclick="sendMessage()"><i class="fas fa-paper-plane"></i> 发送</button>
+            </div>
+            <div class="input-hint">Enter 发送 · Shift+Enter 换行 · 3 个 AI Agent 协同处理</div>
+        </div>
+    </div>
+</div>
+
+<!-- Debug Panel (overlay) -->
+<div class="debug-panel" id="debug-panel">
+    <div class="debug-header">
+        <span><i class="fas fa-bug"></i> 编排追踪</span>
+        <button class="btn" onclick="toggleDebug()" style="font-size:11px;padding:4px 8px;">关闭</button>
+    </div>
+    <div id="debug-content"><div class="debug-entry" style="color:#6c7086;">等待编排开始...</div></div>
+</div>

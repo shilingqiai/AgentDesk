@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from langchain_core.messages import AIMessage
-from agents.graph.state import TicketState, _get_user_text
+from agents.graph.state import TicketState, _get_user_text, _sh_get
 
 logger = logging.getLogger("graph.nodes.terminal")
 
@@ -27,10 +27,10 @@ async def clarification_node(state: TicketState) -> TicketState:
     """
     user_text = _get_user_text(state)
     confidence = state.get("confidence", 0)
-    topic = state.get("last_rag_topic", "")
+    topic = _sh_get(state, "topic", "")
 
     # v4: 有上下文时反问更精准
-    if topic and state.get("conversation_phase") == "self_help_provided":
+    if topic and _sh_get(state, "phase") == "self_help_provided":
         state["final_response"] = (
             f"关于「{topic}」的方案似乎没有解决您的问题。您是想要：\n\n"
             f"1. 我再提供其他思路？\n"

@@ -92,18 +92,34 @@ async def list_tickets(
             offset=offset,
         )
 
-        # 向后兼容：如果员工过滤后为空，补充 requester_id 为空的历史工单
-        if effective_requester and len(tickets) == 0:
-            tickets = db.ticket.list_tickets(
-                ticket_type=ticket_type,
-                status=status,
-                priority=priority,
-                requester_id="",
-                limit=limit,
-                offset=offset,
-            )
+        # 向后兼容：补充旧数据中 requester_id 为空或 "web_user" 的历史工单
+        if effective_requester and len(tickets) < limit:
+            legacy_ids = [effective_requester, "", "web_user"]
+            seen_ids = {t["id"] for t in tickets}
+            for legacy_id in ["", "web_user"]:
+                if legacy_id == effective_requester:
+                    continue
+                legacy_tickets = db.ticket.list_tickets(
+                    ticket_type=ticket_type,
+                    status=status,
+                    priority=priority,
+                    requester_id=legacy_id,
+                    limit=limit - len(tickets),
+                    offset=0,
+                )
+                for t in legacy_tickets:
+                    if t["id"] not in seen_ids:
+                        tickets.append(t)
+                        seen_ids.add(t["id"])
+                if len(tickets) >= limit:
+                    break
 
-        total = db.ticket.get_ticket_count(ticket_type=ticket_type)
+        total = db.ticket.get_ticket_count(
+            ticket_type=ticket_type,
+            status=status,
+            priority=priority,
+            requester_id=effective_requester if resolved_role != "admin" else None,
+        )
         return {
             "status": "success",
             "data": tickets,
@@ -158,7 +174,8 @@ async def create_ticket(request: TicketCreateRequest):
         # 卡片确认模式：直接创建工单，不走 LLM 卡片循环
         if request.skip_card and request.ticket_type:
             from datetime import datetime as dt
-            db = DatabaseRouter()
+            from services.ticket_service import TicketService
+            from services.agent_context import AgentContext
 
             payload = (request.payload or {}).copy()
             extra_fields = request.model_extra or {}
@@ -171,16 +188,23 @@ async def create_ticket(request: TicketCreateRequest):
                 "expense": "报销", "admin": "行政服务",
             }.get(request.ticket_type, "其他")
 
-            ticket = db.ticket.add_ticket(
-                ticket_type=request.ticket_type,
-                title=request.title or request.user_input[:30],
-                description=request.description or request.user_input,
-                category=request.category or type_category,
-                priority=request.priority or "P2",
-                requester_id=request.user_id or "",
-                trace_id=f"card_{dt.utcnow().strftime('%Y%m%d%H%M%S')}",
-                payload=payload,
+            # ★ 统一身份来源：body.user_id > 默认匿名（会触发 validate 报错）
+            ctx = AgentContext(
+                user_name=request.user_id or "",
+                user_id=request.user_id or "",
+                role="employee",
             )
+            ctx.validate(allow_anonymous=False)
+
+            ticket = TicketService.create_ticket(ctx, {
+                "ticket_type": request.ticket_type,
+                "title": request.title or request.user_input[:30],
+                "description": request.description or request.user_input,
+                "category": request.category or type_category,
+                "priority": request.priority or "P2",
+                "payload": payload,
+                "trace_id": f"card_{dt.utcnow().strftime('%Y%m%d%H%M%S')}",
+            })
 
             return {
                 "status": "success",

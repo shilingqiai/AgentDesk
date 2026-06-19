@@ -70,6 +70,10 @@ class ChatRequest(BaseModel):
 async def read_root(request: Request):
     return render_template("index.html", {"request": request})
 
+@router.get("/chat", response_class=HTMLResponse, summary="智能服务台 Chat")
+async def chat_page(request: Request):
+    return render_template("index.html", {"request": request})
+
 @router.get("/knowledge", response_class=HTMLResponse, summary="知识库管理")
 async def knowledge_page(request: Request):
     try:
@@ -91,12 +95,18 @@ async def knowledge_page(request: Request):
 
 @router.get("/tickets", response_class=HTMLResponse, summary="工单管理")
 async def tickets_page(request: Request):
-    return render_template("tickets.html", {"request": request})
+    """已迁移至 SPA — 重定向到首页（Tickets 是 SPA 内的 Tab）"""
+    return render_template("index.html", {"request": request})
 
 
 @router.get("/meeting-rooms", response_class=HTMLResponse, summary="会议室预定")
 async def meeting_rooms_page(request: Request):
     return render_template("meeting_rooms.html", {"request": request})
+
+@router.get("/approvals", response_class=HTMLResponse, summary="审批门户")
+async def approvals_page(request: Request):
+    """已迁移至 SPA — 重定向到首页（Approval 是 SPA 内的 Tab）"""
+    return render_template("index.html", {"request": request})
 
 # ============================================================
 # 聊天API
@@ -119,7 +129,14 @@ async def chat_stream_endpoint(chat: ChatRequest, request: Request):
         ):
             yield token
 
-    return StreamingResponse(token_generator(), media_type="text/plain")
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 @router.post("/chat", summary="兼容性聊天接口")
 async def chat_endpoint(chat: ChatRequest, request: Request):
@@ -137,17 +154,19 @@ async def chat_endpoint(chat: ChatRequest, request: Request):
         ):
             yield token
 
-    return StreamingResponse(token_generator(), media_type="text/plain")
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 @router.post("/chat/reset", summary="重置对话")
 async def reset_conversation(chat: ChatRequest):
     from agents.graph_workflow import orchestration_runner
-    from agents.a2a.context_manager import context_manager
-    from agents.a2a.message_bus import message_bus
-
     await orchestration_runner.reset(chat.thread_id)
-    context_manager.clear_context(chat.thread_id)
-    message_bus.clear_trace(chat.thread_id)
     return {"status": "reset"}
 
 
@@ -241,4 +260,55 @@ async def get_identity(request: Request):
     return {
         "user_name": getattr(request.state, "user_name", ""),
         "role": getattr(request.state, "role", "employee"),
+    }
+
+
+class HistoryRequest(BaseModel):
+    thread_id: str = "web"
+
+
+@router.get("/chat/history", summary="获取会话历史")
+async def get_chat_history(thread_id: str = "web"):
+    """从 LangGraph checkpointer 恢复指定 thread 的对话历史。
+
+    前端页面加载时调用，恢复跨页面导航后的聊天记录。
+    返回 messages 列表 (role + content) 和当前 pending_card_type。
+    """
+    import asyncio
+    from agents.graph_workflow import orchestration_runner
+
+    try:
+        await orchestration_runner._ensure_app()
+    except Exception as e:
+        logger.warning(f"Checkpointer 初始化失败: {e}")
+        return {"messages": [], "pending_card_type": ""}
+
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        state = await asyncio.to_thread(
+            orchestration_runner.app.get_state, config,
+        )
+    except Exception as e:
+        logger.warning(f"获取会话状态失败: {e}")
+        return {"messages": [], "pending_card_type": ""}
+
+    if not state or not state.values:
+        return {"messages": [], "pending_card_type": ""}
+
+    raw_messages = state.values.get("messages", [])
+    serialized = []
+    for m in raw_messages:
+        role = "user" if getattr(m, "type", "") == "human" else "assistant"
+        content = getattr(m, "content", "") if hasattr(m, "content") else str(m)
+        # 跳过空消息和纯系统消息
+        if role == "system" or not str(content).strip():
+            continue
+        serialized.append({
+            "role": role,
+            "content": str(content),
+        })
+
+    return {
+        "messages": serialized,
+        "pending_card_type": state.values.get("pending_card_type", ""),
     }

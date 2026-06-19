@@ -376,21 +376,33 @@ class TicketDispatchSubAgent(BaseSubAgent):
             extra_payload = self._build_extra_payload(ticket_type, ticket_params)
 
             # 3.5 身份信息（从委派消息中提取）
-            requester_id = message.payload.get("user_id", "") or message.payload.get("user_name", "")
-            requester_name = message.payload.get("user_name", "") or requester_id
+            from services.agent_context import AgentContext
+            ctx = AgentContext.from_message_payload(message.payload)
+            if not ctx.is_authenticated:
+                self.logger.error(
+                    f"[TicketDispatch] 身份无效，拒绝创建工单!"
+                    f" payload keys: {list(message.payload.keys())}"
+                )
+                return AgentMessage.create_response(
+                    from_agent=self.agent_id,
+                    to_agent=message.from_agent,
+                    payload={"error": "用户身份获取失败，无法创建工单"},
+                    original_message=message,
+                    success=False,
+                    error="identity_missing",
+                )
 
-            # 4. 创建工单（写入 DB）
-            ticket = self.db_router.ticket.add_ticket(
-                ticket_type=ticket_type,
-                title=ticket_params.get("title", user_input[:30]),
-                description=ticket_params.get("description", user_input),
-                category=ticket_params.get("category", "其他"),
-                priority=ticket_params.get("priority", "P2"),
-                requester_id=requester_id,
-                requester_name=requester_name,
-                trace_id=message.trace_id,
-                payload=extra_payload,
-            )
+            # 4. 创建工单（通过 TicketService 统一入口）
+            from services.ticket_service import TicketService
+            ticket = TicketService.create_ticket(ctx, {
+                "ticket_type": ticket_type,
+                "title": ticket_params.get("title", user_input[:30]),
+                "description": ticket_params.get("description", user_input),
+                "category": ticket_params.get("category", "其他"),
+                "priority": ticket_params.get("priority", "P2"),
+                "payload": extra_payload,
+                "trace_id": message.trace_id,
+            }, db_router=self.db_router)
 
             # 5. 生成用户响应
             response = self._build_response(ticket, ticket_type)
@@ -2180,6 +2192,49 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 "affected_users": extra.get("affected_users", 1),
             }
 
+    def _trigger_approval_workflow(
+        self, ticket_id: int, ticket_type: str, extra_payload: dict,
+    ) -> None:
+        """
+        工单创建后自动触发审批链（leave/purchase）。
+
+        非致命 — 审批流创建失败不影响工单正常使用。
+        """
+        workflow_type = None
+        amount = 0
+
+        if ticket_type == "leave":
+            workflow_type = "leave"
+            amount = (extra_payload or {}).get("total_days", 0)
+        elif ticket_type in ("expense", "admin"):
+            # 报销/采购 统一走 purchase 审批链 (王经理 → 赵财务)
+            svc = (extra_payload or {}).get("service_type", "")
+            if ticket_type == "expense" or "采购" in svc or "procurement" in svc.lower():
+                workflow_type = "purchase"
+                amount = (extra_payload or {}).get("amount", 0)
+
+        if workflow_type is None:
+            return
+
+        try:
+            from services.approval_engine import ApprovalEngine
+            db = self._get_session()
+            try:
+                ApprovalEngine.create_workflow(
+                    ticket_id=ticket_id,
+                    workflow_type=workflow_type,
+                    amount=int(amount) if amount else 0,
+                    db_session=db,
+                )
+                self.logger.info(
+                    f"[Approval] 审批链已创建: ticket_id={ticket_id}, "
+                    f"type={workflow_type}, amount={amount}"
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            self.logger.warning(f"[Approval] 审批链创建失败 (非致命): {e}")
+
     def _build_response(self, ticket: dict, ticket_type: str) -> str:
         """根据 ticket_type 构建差异化用户响应"""
         config = TICKET_TYPE_CONFIG.get(ticket_type, TICKET_TYPE_CONFIG["it_fault"])
@@ -2344,13 +2399,16 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 return "confirm"
             return "new_topic"
 
-    async def execute_card(self, card: dict, user_text: str) -> str:
+    async def execute_card(self, card: dict, user_text: str, user_name: str = "") -> str:
         """
         执行卡片确认后的实际操作。
 
         根据卡片类型：
         - admin: 预定会议室（调用 MeetingRoom API）
         - leave/expense/it_fault: 创建工单（写入 DB）
+
+        如果 user_name 为空，从卡片字段中尝试提取（向后兼容），
+        但调用方应始终传入正确的 user_name。
         """
         card_type = card.get("type", "")
         action_url = card.get("action", "")
@@ -2358,12 +2416,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
 
         # admin / booking 类型 → 预定会议室
         if card_type == "booking" or "meeting-rooms" in action_url:
-            return await self._execute_booking_card(card, user_text)
+            return await self._execute_booking_card(card, user_text, user_name)
 
         # 其他类型 → 创建工单
-        return await self._execute_ticket_card(card, user_text)
+        return await self._execute_ticket_card(card, user_text, user_name)
 
-    async def _execute_booking_card(self, card: dict, user_text: str) -> str:
+    async def _execute_booking_card(self, card: dict, user_text: str, user_name: str = "") -> str:
         """执行会议室预定卡片"""
         try:
             from db.models import MeetingRoom, MeetingRoomBooking
@@ -2403,12 +2461,13 @@ class TicketDispatchSubAgent(BaseSubAgent):
                         f"请重新选择会议室或时段。"
                     )
 
+                booked_by = user_name or fields.get("requester_name", "") or "unknown"
                 booking = MeetingRoomBooking(
                     room_id=room_id,
                     date=date,
                     start_time=start_time,
                     end_time=end_time,
-                    booked_by="web_user",
+                    booked_by=booked_by,
                     title=title,
                     description="通过聊天卡片预定",
                     status="confirmed",
@@ -2444,9 +2503,12 @@ class TicketDispatchSubAgent(BaseSubAgent):
             logger.error(f"[_execute_booking_card] 失败: {e}")
             return f"会议室预定失败：{e}\n请稍后重试或联系行政人员。"
 
-    async def _execute_ticket_card(self, card: dict, user_text: str) -> str:
+    async def _execute_ticket_card(self, card: dict, user_text: str, user_name: str = "") -> str:
         """执行工单创建卡片（IT/请假/报销等）"""
         try:
+            from services.ticket_service import TicketService
+            from services.agent_context import AgentContext
+
             body_template = card.get("body_template", {})
             ticket_type = body_template.get("ticket_type", "it_fault")
             priority = body_template.get("priority", "P2")
@@ -2454,18 +2516,35 @@ class TicketDispatchSubAgent(BaseSubAgent):
             title = fields.get("title", user_text[:30])
             description = fields.get("description", user_text)
 
-            # 创建工单
-            ticket = self.db_router.ticket.add_ticket(
-                ticket_type=ticket_type,
-                title=title,
-                description=description,
-                category=body_template.get("category", "其他"),
-                priority=priority,
-                requester_id=fields.get("requester_name", "web_user"),
-                requester_name=fields.get("requester_name", ""),
-                trace_id=f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                payload={},
+            # ★ 身份来源：参数传入 > 卡片字段 > 拒绝写入
+            resolved_user = user_name or fields.get("requester_name", "") or ""
+            if not resolved_user or resolved_user == "web_user":
+                logger.error(
+                    "[_execute_ticket_card] 身份缺失！卡片确认路径未注入 user_name，"
+                    f"card fields: {list(fields.keys())}"
+                )
+                return "❌ 工单创建失败：未获取到用户身份，请刷新页面重试。"
+
+            ctx = AgentContext(
+                user_name=resolved_user,
+                user_id=resolved_user,
+                role="employee",
             )
+
+            card_fields = {f["key"]: f.get("value", "") for f in card.get("fields", [])}
+            ticket = TicketService.create_ticket(ctx, {
+                "ticket_type": ticket_type,
+                "title": title,
+                "description": description,
+                "category": body_template.get("category", "其他"),
+                "priority": priority,
+                "payload": {
+                    **card_fields,
+                    "reason": description,
+                    "source": "card_confirmation",
+                },
+                "trace_id": f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            }, db_router=self.db_router)
 
             success_msg = card.get("success_message", "工单创建成功！")
             fallback_url = card.get("fallback_url", "/tickets")
@@ -2477,6 +2556,9 @@ class TicketDispatchSubAgent(BaseSubAgent):
                 f"📝 标题：{title}\n\n"
                 f"[{fallback_text}]({fallback_url})"
             )
+        except ValueError as e:
+            logger.error(f"[_execute_ticket_card] 身份验证失败: {e}")
+            return f"❌ 工单创建失败：{e}\n请刷新页面并重新登录。"
         except Exception as e:
             logger.error(f"[_execute_ticket_card] 失败: {e}")
             return f"工单创建失败：{e}\n请稍后重试。"

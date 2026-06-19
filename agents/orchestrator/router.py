@@ -183,6 +183,7 @@ class Router:
             [ROUTER_TOOL_SCHEMA], tool_choice="auto"
         )
         self._initialize_prompt()
+        self.last_response = None  # 最近一次 LLM 响应（供 Token Budget 扣减）
 
     def _initialize_prompt(self):
         self.system_prompt = (
@@ -291,6 +292,7 @@ class Router:
         try:
             # ── 主路径：Function Calling ──
             response = await self.llm_with_tools.ainvoke(messages)
+            self.last_response = response  # 供 Token Budget 扣减
 
             if response.tool_calls:
                 # 原生 Function Calling 返回 → 直接解析 args

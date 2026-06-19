@@ -31,7 +31,41 @@ class SessionManager:
 
         self.engine = create_engine(db_path)
         Base.metadata.create_all(self.engine)
+
+        # Auto-migration: add missing columns to existing tables (SQLite-friendly)
+        self._auto_migrate()
+
         self.Session = scoped_session(sessionmaker(bind=self.engine))
+
+    def _auto_migrate(self):
+        """为已有表添加缺失的列（仅 SQLite 开发阶段，生产用 Alembic）"""
+        import logging
+        log = logging.getLogger("db.migration")
+
+        migrations = {
+            "tickets": [
+                ("current_approver", "VARCHAR(64) DEFAULT ''"),
+                ("approver_chain", "JSON DEFAULT '[]'"),
+                ("history", "JSON DEFAULT '[]'"),
+            ],
+        }
+
+        with self.engine.connect() as conn:
+            for table, columns in migrations.items():
+                # 获取现有列名
+                existing = {
+                    row[1] for row in
+                    conn.exec_driver_sql(f"PRAGMA table_info({table})")
+                }
+                for col_name, col_type in columns:
+                    if col_name not in existing:
+                        sql = f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"
+                        try:
+                            conn.exec_driver_sql(sql)
+                            conn.commit()
+                            log.info(f"[Migrate] {table}.{col_name} 列已添加")
+                        except Exception as e:
+                            log.warning(f"[Migrate] 添加 {table}.{col_name} 失败: {e}")
 
     @contextmanager
     def session_scope(self):

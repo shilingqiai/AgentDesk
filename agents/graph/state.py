@@ -26,37 +26,119 @@ class TicketState(TypedDict):
     intent: str
     urgency: str
     confidence: float
-    plan: list[dict]
-    current_step: int
     agent_results: dict
     needs_human_review: bool
-    human_decision: Optional[str]
     final_response: str
     resolved: bool
     thread_id: str
     pending_card_type: str    # "" = 无锁, "admin"/"leave"/"expense"/"it_fault" = 卡片锁定中
     re_route: bool            # True = action_track 处理完回 Router 重路由
-    # v4: 对话阶段追踪
-    conversation_phase: str   # "initial" | "self_help_provided"
-    last_rag_topic: str       # 上一轮 RAG 回答的主题（如 "VPN故障排查"）
-    last_rag_summary: str     # 上一轮 RAG 回答的核心内容（100字摘要）
+    # v4: 自助服务上下文（合并 conversation_phase + last_rag_topic + last_rag_summary + last_track_type）
+    self_help: dict           # {"phase":"initial|self_help_provided","topic":"...","summary":"...","track":"fast|dynamic|"}
     # v5: 用户身份
     user_name: str            # 当前用户姓名（如 "张三"）
     role: str                 # 角色: "employee" | "admin"
     # v6: 并行节点结果隔离（防 Race Condition）
     parallel_rag_result: dict     # RAG 查询结果（complex track 并行）
-    parallel_tool_result: dict    # ToolAgent 查询结果（complex track 并行）
+    parallel_tool_result: dict    # 余额查询结果（complex track 并行）
     # v7: 动态Agent跨turn状态
     dynamic_agent_messages: list  # 序列化的消息历史（跨turn恢复）
     dynamic_agent_proposals: dict # 上一轮的提议（确认后执行）
-    # v9: 真正的中断控制（每次迭代一个工具调用，create_ticket 后立即 interrupt）
+    # v9: 中断控制（每次迭代一个工具调用，create_ticket 后立即 interrupt）
     dynamic_iteration: int        # 当前 ReAct 迭代次数
     dynamic_interrupt_card: dict  # 当前触发中断的单张卡片
     dynamic_pending_tool: dict    # 等待确认的工具信息 {name, args, tool_call_id}
-    # v11: 上一轮轨道类型 — 供 re_evaluate 正确分发 follow_up
-    last_track_type: str          # "fast" | "dynamic" | ""
     # v12: 对话历史递进摘要 — 超过阈值轮数后触发 LLM 压缩
     conversation_summary: str     # 早期对话的递进摘要（语义要点）
+    # v13: Token 预算控制 — 每次 LLM 调用后扣减，归零强制降级
+    token_budget_remaining: int   # 剩余 Token 预算（默认 10000）
+    token_budget_total: int       # 总预算（用于报告消耗比例）
+
+
+# ── Token 预算控制 ──
+
+DEFAULT_TOKEN_BUDGET = 10000  # 默认每会话 Token 预算
+BUDGET_WARN_THRESHOLD = 0.3   # 剩余 < 30% 时警告
+BUDGET_DEGRADE_THRESHOLD = 0  # 归零后强制降级
+
+
+def _deduct_tokens(state: TicketState, llm_response) -> int:
+    """
+    从 State 预算中扣减 LLM 调用的实际 Token 消耗。
+
+    面试要点：每次 LLM 调用后实时扣减，剩余不足时触发降级策略。
+    LangChain 的 AIMessage 自带 usage_metadata，无需额外计费 API。
+
+    Args:
+        state: 当前会话状态
+        llm_response: LLM 返回的 AIMessage（含 usage_metadata）
+
+    Returns:
+        本次消耗的 Token 数（0 表示无法获取）
+    """
+    used = 0
+    try:
+        if hasattr(llm_response, "usage_metadata") and llm_response.usage_metadata:
+            meta = llm_response.usage_metadata
+            used = (
+                meta.get("input_tokens", 0)
+                + meta.get("output_tokens", 0)
+                + meta.get("total_tokens", 0)
+            )
+            # 如果只有 total_tokens，用它
+            if used == meta.get("total_tokens", 0) and used > 0:
+                pass  # used already equals total
+        elif hasattr(llm_response, "response_metadata"):
+            meta = llm_response.response_metadata
+            used = meta.get("token_usage", {}).get("total_tokens", 0)
+    except Exception:
+        pass
+
+    # 兜底估算（无法获取真实 usage 时）
+    if used <= 0:
+        # 估算：输入 ~500 tokens + 输出 ~200 tokens
+        used = 700
+
+    state["token_budget_remaining"] = max(
+        0, state.get("token_budget_remaining", DEFAULT_TOKEN_BUDGET) - used
+    )
+
+    logger.debug(
+        f"[Budget] -{used} tokens, "
+        f"remaining={state['token_budget_remaining']}/{state.get('token_budget_total', DEFAULT_TOKEN_BUDGET)}"
+    )
+    return used
+
+
+def _budget_exhausted(state: TicketState) -> bool:
+    """检查 Token 预算是否已耗尽"""
+    return state.get("token_budget_remaining", DEFAULT_TOKEN_BUDGET) <= BUDGET_DEGRADE_THRESHOLD
+
+
+def _budget_low(state: TicketState) -> bool:
+    """检查 Token 预算是否偏低"""
+    total = state.get("token_budget_total", DEFAULT_TOKEN_BUDGET) or 1
+    return state.get("token_budget_remaining", DEFAULT_TOKEN_BUDGET) / total < BUDGET_WARN_THRESHOLD
+
+
+def _build_budget_degradation_response(state: TicketState) -> str:
+    """
+    预算耗尽时的降级响应 — 零 Token 消耗的确定性回答
+
+    面试要点：成本控制的底线 — 预算归零后不调 LLM，
+    给出结构化的确定性降级指引。
+    """
+    user_input = _get_user_text(state) if state.get("messages") else ""
+    topic_hint = _detect_topic_from_history(state.get("messages", [])) if state.get("messages") else "通用咨询"
+
+    return (
+        f"⚠️ 当前会话 Token 预算已用完（{state.get('token_budget_total', DEFAULT_TOKEN_BUDGET)} tokens）。\n\n"
+        f"您的咨询涉及「{topic_hint}」，建议通过以下方式继续：\n"
+        f"1. 提交工单 — 专业的 IT/HR 支持团队会跟进处理\n"
+        f"2. 拨打内线 8888 — 紧急问题直接联系服务台\n"
+        f"3. 访问 OA 知识中心 — 自助查阅常见问题\n\n"
+        f"如需继续对话，请刷新页面开启新会话。"
+    )
 
 
 def create_initial_state(user_input: str, thread_id: str = "default",
@@ -64,16 +146,18 @@ def create_initial_state(user_input: str, thread_id: str = "default",
     return TicketState(
         messages=[HumanMessage(content=user_input)],
         track="", agent_id="", intent="", urgency="medium",
-        confidence=0.0, plan=[], current_step=0, agent_results={},
-        needs_human_review=False, human_decision=None,
+        confidence=0.0, agent_results={},
+        needs_human_review=False,
         final_response="", resolved=False, thread_id=thread_id,
         pending_card_type="", re_route=False,
-        conversation_phase="initial", last_rag_topic="", last_rag_summary="",
+        self_help={"phase": "initial", "topic": "", "summary": "", "track": ""},
         user_name=user_name, role=role,
         parallel_rag_result={}, parallel_tool_result={},
         dynamic_agent_messages=[], dynamic_agent_proposals={},
         dynamic_iteration=0, dynamic_interrupt_card={}, dynamic_pending_tool={},
-        last_track_type="", conversation_summary="",
+        conversation_summary="",
+        token_budget_remaining=DEFAULT_TOKEN_BUDGET,
+        token_budget_total=DEFAULT_TOKEN_BUDGET,
     )
 
 
@@ -195,10 +279,21 @@ def _get_user_text(state: TicketState) -> str:
 
 def _reset_self_help_state(state: TicketState) -> None:
     """清空 self-help 追踪状态（防幽灵上下文）"""
-    state["conversation_phase"] = "initial"
-    state["last_rag_topic"] = ""
-    state["last_rag_summary"] = ""
-    state["last_track_type"] = ""
+    state["self_help"] = {"phase": "initial", "topic": "", "summary": "", "track": ""}
+
+
+# ── self_help 辅助方法 ──
+
+def _sh_get(state: TicketState, key: str, default=""):
+    """读取 self_help 字段"""
+    return state.get("self_help", {}).get(key, default)
+
+
+def _sh_set(state: TicketState, **kwargs):
+    """更新 self_help 字段"""
+    sh = dict(state.get("self_help", {}))
+    sh.update(kwargs)
+    state["self_help"] = sh
 
 
 def _generate_rag_topic(user_input: str, response: str) -> str:

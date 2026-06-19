@@ -18,9 +18,9 @@ async def action_track_node(state: TicketState) -> TicketState:
     """卡片响应处理器：仅处理 pending_card 锁期间的 confirm/modify/cancel/new_topic 意图分类。"""
     from agents.orchestrator.agent_registry import agent_registry
     from agents.a2a.protocol import AgentMessage as AM
-    from agents.a2a.message_bus import message_bus
 
     user_text = _get_user_text(state)
+    user_name = state.get("user_name", "")
     pending = state.get("pending_card_type", "")
 
     agent_instance = agent_registry.get_agent("ticket_dispatch")
@@ -51,7 +51,9 @@ async def action_track_node(state: TicketState) -> TicketState:
 
         if intent == "confirm":
             try:
-                result_text = await agent_instance.execute_card(prev_card, user_text)
+                result_text = await agent_instance.execute_card(
+                    prev_card, user_text, user_name,
+                )
                 state["final_response"] = result_text
             except Exception as e:
                 logger.error(f"[ActionTrack] 卡片执行失败: {e}")

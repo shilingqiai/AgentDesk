@@ -80,11 +80,46 @@ async def initialize_system():
 
 
 async def shutdown_system():
-    """系统关闭时清理"""
+    """
+    系统关闭时清理所有资源。
+
+    修复 Windows Ctrl+C 卡死：
+    - SSE 流式接口未退出 → httpx 连接池未释放 → ProactorEventLoop 死等
+    - aiosqlite 连接未关闭 → socket 泄漏
+    这三层必须逐层关闭，顺序不能乱。
+    """
     global _feishu_handler
+    import asyncio
+
+    # 1. 关闭飞书 WebSocket 长连接
     if _feishu_handler:
-        await _feishu_handler.stop_ws()
-        logger.info("🔌 飞书 WebSocket 连接已关闭")
+        try:
+            await asyncio.wait_for(_feishu_handler.stop_ws(), timeout=3.0)
+            logger.info("🔌 飞书 WebSocket 连接已关闭")
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ 飞书 WebSocket 关闭超时（3s），强制跳过")
+        except Exception as e:
+            logger.warning(f"⚠️ 飞书 WebSocket 关闭异常: {e}")
+
+    # 2. 关闭 LangGraph checkpointer (aiosqlite)
+    try:
+        from agents.graph_workflow import orchestration_runner
+        await asyncio.wait_for(orchestration_runner.close(), timeout=3.0)
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ Checkpointer 关闭超时（3s），强制跳过")
+    except Exception as e:
+        logger.warning(f"⚠️ Checkpointer 关闭异常: {e}")
+
+    # 3. 关闭 httpx 连接池（最底层 — 必须在最后关闭）
+    try:
+        from config.model_provider import close_http_clients
+        await asyncio.wait_for(close_http_clients(), timeout=3.0)
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ httpx 连接池关闭超时（3s），强制跳过")
+    except Exception as e:
+        logger.warning(f"⚠️ httpx 连接池关闭异常: {e}")
+
+    logger.info("✅ 所有资源已清理")
 
 
 def create_app() -> FastAPI:
@@ -154,4 +189,13 @@ if __name__ == "__main__":
     args, _ = parser.parse_known_args()
 
     logger.info(f"启动模式: {SERVICE_MODE} | 端口: {args.port}")
-    uvicorn.run(app, host=args.host, port=args.port)
+
+    # ── 修复 Windows Ctrl+C 卡死 ──
+    # timeout_graceful_shutdown=5: 5 秒后强制关闭所有未完成的连接
+    # 配合 shutdown_system() 的资源清理，确保进程不会无限挂起
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        timeout_graceful_shutdown=5,
+    )

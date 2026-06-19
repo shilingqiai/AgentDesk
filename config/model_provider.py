@@ -37,7 +37,7 @@ def _get_http_client() -> httpx.Client:
     if _shared_http_client is None:
         _shared_http_client = httpx.Client(
             verify=_ssl_context,
-            timeout=60.0,
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
         )
     return _shared_http_client
 
@@ -48,7 +48,7 @@ def _get_async_http_client() -> httpx.AsyncClient:
     if _shared_async_http_client is None:
         _shared_async_http_client = httpx.AsyncClient(
             verify=_ssl_context,
-            timeout=60.0,
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
         )
     return _shared_async_http_client
 
@@ -86,3 +86,32 @@ def create_embedding_model():
         base_url=settings.embedding_base_url,
         check_embedding_ctx_length=False,
     )
+
+
+async def close_http_clients():
+    """
+    关闭共享的 httpx 客户端，释放连接池。
+
+    必须在事件循环关闭前调用，否则 Windows ProactorEventLoop 会无限等待
+    未关闭的 TCP 连接，导致 Ctrl+C 后进程卡死。
+    """
+    global _shared_http_client, _shared_async_http_client
+
+    import logging
+    _log = logging.getLogger("model_provider")
+
+    if _shared_async_http_client is not None:
+        try:
+            await _shared_async_http_client.aclose()
+            _log.info("httpx.AsyncClient 已关闭")
+        except Exception as e:
+            _log.warning(f"关闭 AsyncClient 失败: {e}")
+        _shared_async_http_client = None
+
+    if _shared_http_client is not None:
+        try:
+            _shared_http_client.close()
+            _log.info("httpx.Client 已关闭")
+        except Exception as e:
+            _log.warning(f"关闭 Client 失败: {e}")
+        _shared_http_client = None

@@ -10,11 +10,11 @@ MCP 工具注册与调用框架
     from agents.tools import tool_registry, ToolDefinition
 
     @tool_registry.register(
-        name="weather_query",
-        description="查询指定城市的实时天气信息",
-        parameters={"city": {"type": "string", "description": "城市名称"}},
+        name="web_search",
+        description="在网上搜索信息",
+        parameters={"query": {"type": "string", "description": "搜索查询词"}},
     )
-    async def weather_query(city: str) -> dict:
+    async def web_search(query: str) -> dict:
         ...
 """
 

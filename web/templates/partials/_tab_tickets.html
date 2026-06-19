@@ -1,0 +1,103 @@
+<!-- _tab_tickets.html — Tickets Tab Content (Alpine.js x-data="ticketsApp") -->
+<div x-data="ticketsApp()" x-init="init()">
+    <!-- Filters Bar -->
+    <div class="topbar" style="margin-bottom:12px;">
+        <div class="topbar-left">
+            <span class="topbar-title">📋 工单列表</span>
+        </div>
+        <div class="topbar-info">
+            共 <strong x-text="totalCount"></strong> 条 ·
+            第 <span x-text="currentPage"></span>/<span x-text="totalPages"></span> 页
+        </div>
+    </div>
+
+    <!-- Quick Filters -->
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        <select x-model="filters.type" @change="applyFilters()" class="btn" style="font-size:12px;">
+            <option value="">全部类型</option>
+            <option value="it_fault">🔧 IT故障</option>
+            <option value="leave">🏖 请假</option>
+            <option value="expense">💰 报销</option>
+            <option value="admin">📦 行政</option>
+        </select>
+        <select x-model="filters.status" @change="applyFilters()" class="btn" style="font-size:12px;">
+            <option value="">全部状态</option>
+            <option value="created">待处理</option>
+            <option value="assigned">已派发</option>
+            <option value="processing">处理中</option>
+            <option value="resolved">已解决</option>
+            <option value="closed">已关闭</option>
+        </select>
+        <button class="btn" @click="loadTickets()" style="font-size:12px;margin-left:auto;">
+            <i class="fas fa-sync-alt"></i> 刷新
+        </button>
+    </div>
+
+    <!-- Loading -->
+    <div x-show="loading" style="text-align:center;padding:20px;color:var(--text-secondary);">
+        <i class="fas fa-spinner fa-spin"></i> 加载中...
+    </div>
+
+    <!-- Ticket Cards -->
+    <template x-for="ticket in tickets" :key="ticket.id">
+        <div class="ticket-card" :class="{ expanded: expandedId === ticket.id }" @click="expandTicket(ticket)">
+            <div class="ticket-header">
+                <div class="ticket-type-icon" :class="ticket.ticket_type">
+                    <i :class="'fas ' + getTypeIcon(ticket.ticket_type)"></i>
+                </div>
+                <div class="ticket-info">
+                    <div class="ticket-number" x-text="ticket.ticket_number"></div>
+                    <div class="ticket-title" x-text="ticket.title"></div>
+                    <div class="ticket-desc" x-text="ticket.description"></div>
+                    <div class="ticket-badges">
+                        <span class="badge badge-type" x-text="getTypeLabel(ticket.ticket_type)"></span>
+                        <span class="badge badge-priority" :class="ticket.priority" x-text="ticket.priority"></span>
+                        <span class="badge badge-status" :class="ticket.status" x-text="getStatusLabel(ticket.status)"></span>
+                        <span style="font-size:11px;color:var(--text-secondary);" x-text="formatDate(ticket.created_at)"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Expanded Detail -->
+            <div class="ticket-detail" @click.stop="">
+                <div class="detail-grid">
+                    <div class="detail-item"><div class="dl">工单编号</div><div class="dv" x-text="ticket.ticket_number" style="font-family:monospace;"></div></div>
+                    <div class="detail-item"><div class="dl">分类</div><div class="dv" x-text="ticket.category"></div></div>
+                    <div class="detail-item"><div class="dl">申请人</div><div class="dv" x-text="ticket.requester_id || '-'"></div></div>
+                    <div class="detail-item"><div class="dl">指派人</div><div class="dv" x-text="ticket.assigned_to || '未指派'"></div></div>
+                    <div class="detail-item"><div class="dl">创建时间</div><div class="dv" x-text="formatDateFull(ticket.created_at)"></div></div>
+                    <div class="detail-item"><div class="dl">更新时间</div><div class="dv" x-text="formatDateFull(ticket.updated_at)"></div></div>
+                </div>
+
+                <!-- Workflow Approval Trail -->
+                <div class="workflow-section" x-show="ticket._workflow" x-html="ticket._workflowHtml || ''"></div>
+
+                <!-- Status update buttons (admin only) -->
+                <div x-show="isAdmin" style="margin-top:12px;display:flex;gap:8px;">
+                    <button class="btn success" @click="updateStatus(ticket.id, 'processing')">标记处理中</button>
+                    <button class="btn primary" @click="updateStatus(ticket.id, 'resolved')">标记已解决</button>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Empty state -->
+    <div x-show="!loading && tickets.length === 0" class="empty-state">
+        <i class="fas fa-inbox"></i>
+        <h3>暂无工单</h3>
+        <p>在 Chat 中提交工单后将在此显示</p>
+    </div>
+
+    <!-- Pagination -->
+    <div class="pagination" x-show="totalPages > 1">
+        <button class="btn" :disabled="currentPage <= 1" @click="goPage(currentPage - 1)">« 上一页</button>
+        <template x-for="p in visiblePages" :key="p">
+            <button class="btn" :class="{ primary: p === currentPage }" @click="goPage(p)" x-text="p"></button>
+        </template>
+        <button class="btn" :disabled="currentPage >= totalPages" @click="goPage(currentPage + 1)">下一页 »</button>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" :class="toast.type" x-show="toast.show" x-text="toast.message"
+         style="position:fixed;top:20px;right:20px;z-index:200;transition:opacity 0.3s;"></div>
+</div>

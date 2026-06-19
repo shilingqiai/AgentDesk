@@ -1,0 +1,73 @@
+<!-- _tab_admin.html — Admin Dashboard (v11 enhanced) -->
+<div>
+    <div class="topbar" style="margin-bottom:12px;">
+        <span class="topbar-title">⚙ 管理仪表盘</span>
+    </div>
+
+    <!-- ═══ 1. 系统概览 ═══ -->
+    <div class="stats-row" style="margin-bottom:24px;">
+        <div class="stat-card">
+            <div class="num total" id="admin-stat-total">-</div>
+            <div class="label">总工单</div>
+        </div>
+        <div class="stat-card">
+            <div class="num pending" id="admin-stat-open">-</div>
+            <div class="label">进行中</div>
+        </div>
+        <div class="stat-card">
+            <div class="num approved" id="admin-stat-resolved">-</div>
+            <div class="label">已完成</div>
+        </div>
+        <div class="stat-card">
+            <div class="num rejected" id="admin-stat-high">-</div>
+            <div class="label">高优先级</div>
+        </div>
+    </div>
+
+    <!-- ═══ 2. Agent 状态 ═══ -->
+    <div class="section-title">🤖 Agent 运行状态</div>
+    <div id="admin-agent-list" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:20px;">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
+    </div>
+
+    <!-- ═══ 3. 审批链规则（只读展示） ═══ -->
+    <div class="section-title">🔗 审批链规则（确定性引擎）</div>
+    <div id="admin-chain-rules" style="margin-bottom:20px;">
+        <div class="approval-card" style="opacity:0.85;">
+            <div class="approval-icon leave"><i class="fas fa-umbrella-beach"></i></div>
+            <div class="approval-body">
+                <div class="ticket-title">请假 (leave)</div>
+                <div class="ticket-meta">
+                    <span>王经理 → 李HR</span>
+                    <span style="color:var(--text-secondary);font-size:11px;">部门经理 → HR</span>
+                </div>
+            </div>
+        </div>
+        <div class="approval-card" style="opacity:0.85;">
+            <div class="approval-icon expense"><i class="fas fa-receipt"></i></div>
+            <div class="approval-body">
+                <div class="ticket-title">报销 / 采购 (expense / purchase)</div>
+                <div class="ticket-meta">
+                    <span>王经理 → 赵财务</span>
+                    <span style="color:var(--text-secondary);font-size:11px;">部门经理 → 财务</span>
+                </div>
+            </div>
+        </div>
+        <div class="approval-card" style="opacity:0.85;">
+            <div class="approval-icon procurement"><i class="fas fa-network-wired"></i></div>
+            <div class="approval-body">
+                <div class="ticket-title">IT 故障 (it_fault)</div>
+                <div class="ticket-meta">
+                    <span>无需审批</span>
+                    <span style="color:var(--text-secondary);font-size:11px;">直接创建工单</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ 4. 最近工单（全量） ═══ -->
+    <div class="section-title">📋 最近工单（全量，不限申请人）</div>
+    <div id="admin-recent-tickets">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
+    </div>
+</div>

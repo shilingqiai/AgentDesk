@@ -56,6 +56,9 @@ class TicketRepository:
         requester_name: str = "",
         assigned_to: str = "",
         trace_id: str = "",
+        current_approver: str = "",
+        approver_chain: list = None,
+        history: list = None,
         payload: dict = None,
     ) -> dict:
         """
@@ -77,6 +80,9 @@ class TicketRepository:
                 requester_name=requester_name,
                 assigned_to=assigned_to,
                 trace_id=trace_id,
+                current_approver=current_approver,
+                approver_chain=approver_chain or [],
+                history=history or [],
                 payload=payload or {},
             )
             session.add(ticket)
@@ -156,6 +162,7 @@ class TicketRepository:
             "status", "priority", "assigned_to", "title",
             "description", "category", "payload", "ticket_type",
             "requester_id", "requester_name",
+            "current_approver", "approver_chain", "history",
         }
         filtered = {k: v for k, v in updates.items() if k in allowed_fields}
         if not filtered:
@@ -199,12 +206,24 @@ class TicketRepository:
                 session.delete(ticket)
             return True
 
-    def get_ticket_count(self, ticket_type: str = None) -> int:
-        """获取工单总数"""
+    def get_ticket_count(
+        self,
+        ticket_type: str = None,
+        status: str = None,
+        priority: str = None,
+        requester_id: str = None,
+    ) -> int:
+        """获取工单总数（支持与 list_tickets 相同的筛选条件）"""
         with self.session_manager.session_scope() as session:
             query = session.query(Ticket).filter(Ticket.is_active == 1)
             if ticket_type:
                 query = query.filter(Ticket.ticket_type == ticket_type)
+            if status:
+                query = query.filter(Ticket.status == status)
+            if priority:
+                query = query.filter(Ticket.priority == priority)
+            if requester_id:
+                query = query.filter(Ticket.requester_id == requester_id)
             return query.count()
 
     def get_stats(self) -> dict[str, Any]:
@@ -283,6 +302,9 @@ class TicketRepository:
             "requester_name": ticket.requester_name,
             "assigned_to": ticket.assigned_to,
             "trace_id": ticket.trace_id,
+            "current_approver": ticket.current_approver or "",
+            "approver_chain": ticket.approver_chain or [],
+            "history": ticket.history or [],
             "payload": ticket.payload,
             "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
             "updated_at": ticket.updated_at.isoformat() if ticket.updated_at else None,

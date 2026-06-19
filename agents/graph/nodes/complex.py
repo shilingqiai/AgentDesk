@@ -21,9 +21,9 @@ logger = logging.getLogger("graph.nodes.complex")
 
 async def complex_track_node(state: TicketState) -> TicketState:
     """
-    复杂通道：请假/报销固定 DAG (RAG ∥ ToolAgent → TicketDispatch)，非 DAG 场景串行兜底。
+    复杂通道：请假/报销固定 DAG (RAG ∥ 余额查询 → TicketDispatch)，非 DAG 场景串行兜底。
 
-    v6: 对请假/报销场景实现并行编排（RAG ∥ ToolAgent → TicketDispatch），
+    v6: 对请假/报销场景实现并行编排（RAG ∥ leave_balance_query → TicketDispatch），
     其他场景走串行 TaskPlanner 路径。
     并行结果通过 Python 变量传递（不写 LangGraph State），避免 Race Condition。
     """
@@ -31,7 +31,6 @@ async def complex_track_node(state: TicketState) -> TicketState:
     from agents.orchestrator.agent_registry import agent_registry
     from agents.orchestrator.response_synthesizer import ResponseSynthesizer
     from agents.a2a.protocol import AgentMessage as AM
-    from agents.a2a.message_bus import message_bus
     from agents.orchestrator.router import RouteResult
     from config.model_provider import create_chat_model
 
@@ -40,6 +39,11 @@ async def complex_track_node(state: TicketState) -> TicketState:
         state["messages"], summary=state.get("conversation_summary", ""),
     )
     user_name = state.get("user_name", "")
+    if not user_name:
+        logger.warning("[ComplexTrack] user_name 为空，降级为 fast")
+        state["final_response"] = "无法获取您的用户身份，请刷新页面后重试。"
+        state["resolved"] = True
+        return state
     llm = create_chat_model(model_type="main", temperature=0)
 
     # ================================================================
@@ -58,12 +62,11 @@ async def complex_track_node(state: TicketState) -> TicketState:
         writer = get_stream_writer()
 
         try:
-            # ── Step 1+2: 并行 RAG查政策 + ToolAgent查余额 ──
+            # ── Step 1+2: 并行 RAG查政策 + 余额查询 ──
             rag_agent = agent_registry.get_agent("enterprise_rag")
-            tool_agent = agent_registry.get_agent("tool_agent")
             ticket_agent = agent_registry.get_agent("ticket_dispatch")
 
-            if not rag_agent or not tool_agent or not ticket_agent:
+            if not rag_agent or not ticket_agent:
                 logger.error("[ComplexTrack:v6] Agent 未就绪，降级为串行")
                 state["final_response"] = "系统初始化未完成，请稍后重试。"
                 state["resolved"] = True
@@ -96,22 +99,16 @@ async def complex_track_node(state: TicketState) -> TicketState:
                 return {"success": True, "policy_text": "", "sources": []}
 
             async def _tool_balance():
-                """并行任务 B: 查询员工余额"""
-                from agents.sub_agents.tool_agent import ToolAgent
-                ta = ToolAgent()
-                msg = AM.create_delegation(
-                    from_agent="orchestrator", to_agent="tool_agent",
-                    payload={
-                        "user_input": f"查询员工 {user_name} 的{'年假' if is_leave else '相关'}余额",
-                        "task": f"查询 {user_name} 的余额数据",
-                    },
+                """并行任务 B: 查询员工余额 — 直接调用 leave_balance_query 工具"""
+                from agents.tools import tool_registry
+                result = await tool_registry.invoke(
+                    "leave_balance_query", employee_name=user_name,
                 )
-                result = await ta.execute(msg)
-                if result.success:
+                if result.success and result.data:
                     return {
                         "success": True,
-                        "tool_result": result.payload.get("tool_result", {}),
-                        "direct_response": result.payload.get("direct_response", ""),
+                        "tool_result": result.data,
+                        "direct_response": json.dumps(result.data, ensure_ascii=False),
                     }
                 return {"success": False, "error": result.error}
 
@@ -163,13 +160,12 @@ async def complex_track_node(state: TicketState) -> TicketState:
             )
 
             result = await ticket_agent.execute(ticket_msg)
-            message_bus.record(result)
 
             state["agent_results"] = {
                 "enterprise_rag": {"success": policy_result["success"],
                                    "payload": policy_result, "error": None},
-                "tool_agent": {"success": balance_result["success"],
-                               "payload": balance_result, "error": None},
+                "leave_balance_query": {"success": balance_result["success"],
+                                       "payload": balance_result, "error": None},
                 "ticket_dispatch": {"success": result.success,
                                     "payload": result.payload, "error": result.error},
             }
@@ -249,10 +245,6 @@ async def complex_track_node(state: TicketState) -> TicketState:
 
     plan = await planner.plan(intent_result, plan_input)
 
-    state["plan"] = [
-        {"agent_id": s.agent_id, "task": s.task, "params": s.params, "depends_on": s.depends_on}
-        for s in plan.steps
-    ]
     state["needs_human_review"] = state.get("needs_human_review", False) or plan.needs_human_review
 
     agent_results = {}
@@ -276,7 +268,6 @@ async def complex_track_node(state: TicketState) -> TicketState:
         )
         try:
             result = await agent_instance.execute(delegation)
-            message_bus.record(result)
             agent_results[agent_id] = {
                 "success": result.success, "payload": result.payload, "error": result.error,
             }
