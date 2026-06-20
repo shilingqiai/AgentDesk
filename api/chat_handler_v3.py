@@ -17,6 +17,7 @@ Copilot Studio 风格的多Agent编排 API (v3)
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,9 @@ from agents.orchestrator.telemetry import telemetry
 from agents.orchestrator.governance import audit_trail, AuditEvent, AuditEventType
 
 logger = logging.getLogger("api.chat_handler_v3")
+
+# ══ 延迟诊断开关 — 完成后删除此行及下方计时代码 ══
+_LATENCY_DEBUG = True
 
 # 创建 v3 路由
 router = APIRouter(prefix="/api/v3", tags=["Copilot Studio Orchestration"])
@@ -106,17 +110,29 @@ async def chat_stream(request: ChatRequest):
 
     async def event_generator():
         """SSE 事件生成器"""
+        _t_total_start = time.time()
         try:
             # 使用编排工作流运行器处理
+            _t_stream_start = time.time()
+            if _LATENCY_DEBUG:
+                logger.info(f"[⏱️ LATENCY] ═══ 请求开始: thread={request.thread_id}, input={request.user_input[:60]}")
             async for token in orchestration_runner.run_stream(
                 request.user_input,
                 request.thread_id,
             ):
+                if _LATENCY_DEBUG and not hasattr(event_generator, '_first_token_logged'):
+                    event_generator._first_token_logged = True
+                    _elapsed = time.time() - _t_total_start
+                    logger.info(f"[⏱️ LATENCY] 🎯 首字节延迟: {_elapsed:.2f}s (到 run_stream 入口: {time.time() - _t_stream_start:.2f}s)")
                 # SSE 格式
                 yield f"data: {token}\n\n"
 
             # 发送完成信号
             yield "data: [DONE]\n\n"
+
+            if _LATENCY_DEBUG:
+                _elapsed_total = time.time() - _t_total_start
+                logger.info(f"[⏱️ LATENCY] ✅ 请求完成: 总耗时={_elapsed_total:.2f}s")
 
             # 审计事件：编排完成
             audit_trail.record(AuditEvent(

@@ -158,7 +158,11 @@
             var res = await fetch('/api/approvals/approve', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({step_id: parseInt(stepId), comment: ''}),
+                body: JSON.stringify({
+                    step_id: parseInt(stepId),
+                    comment: '',
+                    approver_name: getUser(),
+                }),
             });
             var data = await res.json();
             if (res.ok && data.success) {
@@ -194,7 +198,11 @@
             var res = await fetch('/api/approvals/reject', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({step_id: parseInt(rejectTarget.stepId), comment: comment}),
+                body: JSON.stringify({
+                    step_id: parseInt(rejectTarget.stepId),
+                    comment: comment,
+                    approver_name: getUser(),
+                }),
             });
             var data = await res.json();
             if (res.ok && data.success) {
@@ -235,23 +243,62 @@
                         var prevAllDone = wf.steps.slice(0, i).every(function(s) { return s.status === 'approved'; });
                         if (prevAllDone) { cls = 'current'; icon = '⏳'; }
                     }
+                    // Tooltip 数据
+                    var tooltip = '';
+                    if (step.decided_at) {
+                        var d = new Date(step.decided_at);
+                        var ts = d.toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+                        tooltip = ' title="' + escapeHtml(step.approver) + ' — ' + ts + (step.comment ? '\\n' + escapeHtml(step.comment) : '') + '"';
+                    }
+                    // 耗时
+                    var timeDelta = step.decided_at ? '<div class="trail-step-time">' + _fmtDelta(step.created_at, step.decided_at) + '</div>' : '';
+                    var roleLabel = _roleLabel(step.approver_role);
                     var arrow = i > 0 ? '<span class="trail-arrow">→</span>' : '';
                     flow.innerHTML += arrow +
-                        '<div class="trail-node"><div class="node-circle ' + cls + '">' + icon + '</div>' +
-                        '<div class="node-label">' + escapeHtml(step.approver) + '<br><span style="font-size:10px;opacity:0.7;">' + escapeHtml(step.approver_role) + '</span></div></div>';
+                        '<div class="trail-node-wrapper"' + tooltip + '>' +
+                        '<div class="trail-node"><div class="node-circle ' + cls + '">' + icon + '</div></div>' +
+                        '<div class="trail-node-label">' + escapeHtml(step.approver) + '</div>' +
+                        '<div class="trail-node-label" style="font-size:9px;opacity:0.6;">' + escapeHtml(roleLabel) + '</div>' +
+                        timeDelta +
+                        '</div>';
                 });
                 var finalCls = 'pending', finalIcon = '\u{1F3C1}';
                 if (wf.status === 'approved') { finalCls = 'done'; finalIcon = '✓'; }
                 if (wf.status === 'rejected') { finalCls = 'rejected'; finalIcon = '✗'; }
                 flow.innerHTML += '<span class="trail-arrow">→</span>' +
-                    '<div class="trail-node"><div class="node-circle ' + finalCls + '">' + finalIcon + '</div>' +
-                    '<div class="node-label">完成</div></div>';
+                    '<div class="trail-node-wrapper">' +
+                    '<div class="trail-node"><div class="node-circle ' + finalCls + '">' + finalIcon + '</div></div>' +
+                    '<div class="trail-node-label">完成</div></div>';
             }
             if (section) section.style.display = '';
             if (section) section.scrollIntoView({behavior: 'smooth'});
         } catch(e) {
             showToast('加载审批轨迹失败', 'error');
         }
+    }
+
+    /** 计算审批步骤耗时 */
+    function _fmtDelta(createdAt, decidedAt) {
+        if (!createdAt || !decidedAt) return '';
+        try {
+            var start = new Date(createdAt);
+            var end = new Date(decidedAt);
+            var diffMin = Math.round((end - start) / 60000);
+            if (diffMin < 60) return diffMin + 'min';
+            var h = Math.floor(diffMin / 60);
+            var m = diffMin % 60;
+            return h + 'h' + (m > 0 ? ' ' + m + 'min' : '');
+        } catch(e) { return ''; }
+    }
+
+    /** 审批角色 → 中文 */
+    function _roleLabel(role) {
+        var map = {
+            'department_manager': '部门经理',
+            'hr': 'HR',
+            'finance': '财务',
+        };
+        return map[role] || role;
     }
 
     // ============================================================

@@ -171,9 +171,9 @@ class TestApprovalWorkflowE2E:
         assert result["workflow_status"] == "approved"
         assert result["next_step"] is None
 
-        # 验证工单状态已推进
+        # 验证工单状态已推进（通过审批 → approved）
         db.refresh(ticket)
-        assert ticket.status == "processing"
+        assert ticket.status == "approved"
 
     def test_reject_stops_workflow(self, db, ticket):
         """驳回任一步 → workflow rejected"""
@@ -192,9 +192,9 @@ class TestApprovalWorkflowE2E:
         assert result["workflow_status"] == "rejected"
         assert "余额不足" in result["reason"]
 
-        # 验证工单状态不变
+        # 验证工单状态已变为 rejected（修复旧 bug: 驳回后不再停留在 created）
         db.refresh(ticket)
-        assert ticket.status == "created"
+        assert ticket.status == "rejected"
 
     # ── 边界条件 ──
 

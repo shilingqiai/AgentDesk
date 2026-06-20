@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from services.agent_context import AgentContext
+from services.ticket_state import TicketStatus
+from services.workflow_service import WorkflowService
+from services.event_bus import EventBus, EventType
 
 logger = logging.getLogger("ticket.service")
 
@@ -150,6 +153,23 @@ class TicketService:
                 f"chain={' → '.join(approver_chain) if approver_chain else '无审批'}"
             )
 
+            # ── 事件: 工单创建 (fire-and-forget) ──
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(EventBus.emit(
+                        EventType.TICKET_CREATED,
+                        ticket_id=ticket["id"],
+                        ticket_number=ticket["ticket_number"],
+                        ticket_type=ticket_type,
+                        requester_name=context.user_name,
+                        has_approval=bool(approver_chain),
+                        operator=context.user_name,
+                    ))
+            except RuntimeError:
+                pass  # 无事件循环（测试/同步环境），静默跳过
+
             # 5. 触发审批流
             if approver_chain and ticket_type in ("leave", "expense"):
                 cls._create_approval_workflow(
@@ -158,6 +178,18 @@ class TicketService:
                     payload=payload,
                     db=db,
                 )
+                # 状态转换: CREATED → PENDING_APPROVAL（工单进入审批流程）
+                db_session2 = db.session_manager.Session()
+                try:
+                    WorkflowService.transition(
+                        ticket_id=ticket["id"],
+                        to_status=TicketStatus.PENDING_APPROVAL,
+                        comment=f"提交审批 — {' → '.join(approver_chain)}",
+                        db_session=db_session2,
+                    )
+                    ticket["status"] = TicketStatus.PENDING_APPROVAL.value
+                finally:
+                    db_session2.close()
 
             return ticket
 

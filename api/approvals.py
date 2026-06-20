@@ -13,11 +13,13 @@ router = APIRouter(prefix="/api/approvals", tags=["审批流"])
 class ApproveRequest(BaseModel):
     step_id: int
     comment: str = ""
+    approver_name: str = Field(default="", description="操作人姓名（用于权限校验）")
 
 
 class RejectRequest(BaseModel):
     step_id: int
     comment: str = ""
+    approver_name: str = Field(default="", description="操作人姓名（用于权限校验）")
 
 
 def _get_db():
@@ -56,9 +58,12 @@ async def approve(req: ApproveRequest):
             workflow_id=step.workflow_id,
             step_order=step.step_order,
             comment=req.comment,
+            approver_name=req.approver_name,
             db_session=db,
         )
         return {"success": True, **result}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -81,9 +86,12 @@ async def reject(req: RejectRequest):
             workflow_id=step.workflow_id,
             step_order=step.step_order,
             comment=req.comment,
+            approver_name=req.approver_name,
             db_session=db,
         )
         return {"success": True, **result}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -103,3 +111,60 @@ async def get_workflow_status(ticket_id: int):
         return {"success": True, "workflow": status}
     finally:
         db.close()
+
+
+@router.get("/chains")
+async def list_approval_chains():
+    """
+    获取所有审批链配置及实时状态。
+
+    Admin 面板使用此接口渲染审批链流程图。
+    返回每种审批类型的审批链规则 + 当前在途工单数。
+    """
+    from services.approval_engine import APPROVAL_CHAINS, DEFAULT_APPROVERS
+    from db.models import ApprovalWorkflow
+
+    db = _get_db()
+    try:
+        chains = {}
+        for wf_type, thresholds in APPROVAL_CHAINS.items():
+            # 取第一个（也是唯一一个）阈值的角色列表
+            roles = thresholds[0][1] if thresholds else []
+            steps = []
+            for role in roles:
+                steps.append({
+                    "role": role,
+                    "name": DEFAULT_APPROVERS.get(role, role),
+                })
+
+            # 统计该类型审批流在途数量
+            active_count = db.query(ApprovalWorkflow).filter(
+                ApprovalWorkflow.workflow_type == wf_type,
+                ApprovalWorkflow.status == "pending",
+            ).count()
+
+            chains[wf_type] = {
+                "name": _chain_name(wf_type),
+                "steps": steps,
+                "active_count": active_count,
+            }
+
+        # 无审批类型（IT 故障等）
+        chains["it_fault"] = {
+            "name": "IT 故障报修",
+            "steps": [],
+            "active_count": 0,
+        }
+
+        return {"success": True, "chains": chains}
+    finally:
+        db.close()
+
+
+def _chain_name(wf_type: str) -> str:
+    """审批类型 → 中文名称"""
+    names = {
+        "leave": "请假审批",
+        "purchase": "采购 / 报销审批",
+    }
+    return names.get(wf_type, wf_type)

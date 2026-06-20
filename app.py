@@ -60,6 +60,42 @@ async def initialize_system():
             knowledge_service = KnowledgeService()
             await knowledge_service.initialize()
 
+        # 事件总线 — 注册 Handler（web / all 模式）
+        if SERVICE_MODE in ("web", "all"):
+            logger.info("📡 初始化事件总线...")
+            from services.event_bus import EventBus, EventType
+            from services.event_handlers import (
+                NotificationHandler as NH,
+                AuditHandler as AH,
+                DashboardHandler as DH,
+            )
+            # 通知
+            EventBus.subscribe(EventType.TICKET_CREATED, NH.on_ticket_created)
+            EventBus.subscribe(EventType.TICKET_STATUS_CHANGED, NH.on_status_changed)
+            EventBus.subscribe(EventType.APPROVAL_STEP_APPROVED, NH.on_approval_step_approved)
+            EventBus.subscribe(EventType.APPROVAL_COMPLETED, NH.on_approval_completed)
+            EventBus.subscribe(EventType.APPROVAL_REJECTED, NH.on_approval_rejected)
+            # 审计
+            EventBus.subscribe(EventType.TICKET_CREATED, AH.on_any_event)
+            EventBus.subscribe(EventType.TICKET_STATUS_CHANGED, AH.on_any_event)
+            EventBus.subscribe(EventType.APPROVAL_STEP_APPROVED, AH.on_any_event)
+            EventBus.subscribe(EventType.APPROVAL_COMPLETED, AH.on_any_event)
+            EventBus.subscribe(EventType.APPROVAL_REJECTED, AH.on_any_event)
+            # Dashboard
+            EventBus.subscribe(EventType.TICKET_CREATED, DH.on_ticket_created)
+            EventBus.subscribe(EventType.TICKET_STATUS_CHANGED, DH.on_status_changed)
+            # SLA
+            EventBus.subscribe(EventType.SLA_BREACHED, NH.on_sla_breached)
+            EventBus.subscribe(EventType.SLA_BREACHED, AH.on_any_event)
+            EventBus.subscribe(EventType.SLA_BREACHED, DH.on_sla_breached)
+            logger.info("✅ 事件总线已就绪")
+
+            # SLA 定时调度器
+            logger.info("⏰ 启动 SLA 定时调度器...")
+            from services.sla_scheduler import SLAScheduler
+            await SLAScheduler.start()
+            logger.info("✅ SLA 调度器已启动")
+
         # 飞书 WebSocket 长连接（feishu / all 模式）
         if SERVICE_MODE in ("feishu", "all"):
             if os.getenv("FEISHU_APP_ID") and os.getenv("FEISHU_APP_SECRET"):
@@ -91,7 +127,17 @@ async def shutdown_system():
     global _feishu_handler
     import asyncio
 
-    # 1. 关闭飞书 WebSocket 长连接
+    # 1. 停止 SLA 调度器
+    try:
+        from services.sla_scheduler import SLAScheduler
+        await asyncio.wait_for(SLAScheduler.stop(), timeout=3.0)
+        logger.info("⏰ SLA 调度器已停止")
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ SLA 调度器停止超时（3s），强制跳过")
+    except Exception as e:
+        logger.warning(f"⚠️ SLA 调度器停止异常: {e}")
+
+    # 2. 关闭飞书 WebSocket 长连接
     if _feishu_handler:
         try:
             await asyncio.wait_for(_feishu_handler.stop_ws(), timeout=3.0)

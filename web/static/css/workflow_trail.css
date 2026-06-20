@@ -1,0 +1,243 @@
+/**
+ * workflow_trail.css — 审批链轨迹增强样式
+ *
+ * 用于: Admin 面板审批链流程图 + 审批 Tab Trail 弹窗 + 工单详情 Trail
+ */
+
+/* ── 审批链流程图（Admin 面板） ── */
+
+.approval-chain-flow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 12px 0;
+}
+
+.chain-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 64px;
+}
+
+.chain-node-circle {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 600;
+    border: 2px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+.chain-node-circle.done {
+    background: #10b981;
+    border-color: #10b981;
+    color: #fff;
+}
+
+.chain-node-circle.current {
+    background: #f59e0b;
+    border-color: #f59e0b;
+    color: #fff;
+    animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+.chain-node-circle.pending {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text-muted);
+}
+
+.chain-node-circle.rejected {
+    background: #ef4444;
+    border-color: #ef4444;
+    color: #fff;
+}
+
+.chain-node-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-align: center;
+    max-width: 72px;
+    line-height: 1.3;
+}
+
+.chain-arrow {
+    font-size: 18px;
+    color: var(--text-muted);
+    margin: 0 -2px;
+}
+
+/* ── Trail Tooltip ── */
+
+.trail-node {
+    position: relative;
+    cursor: pointer;
+}
+
+.trail-tooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface-dark, #1e293b);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    pointer-events: none;
+}
+
+.trail-node:hover .trail-tooltip {
+    display: block;
+}
+
+.trail-tooltip .tt-time {
+    color: #94a3b8;
+    font-size: 11px;
+}
+
+/* ── Pulse Animation ── */
+
+@keyframes pulse-glow {
+    0%, 100% {
+        box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5);
+    }
+    50% {
+        box-shadow: 0 0 0 10px rgba(245, 158, 11, 0);
+    }
+}
+
+/* ── Trail Flow (审批 Tab 弹窗) ── */
+
+.trail-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 16px 0;
+    flex-wrap: wrap;
+}
+
+.trail-flow .node-circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    border: 2px solid var(--border);
+    transition: all 0.3s ease;
+}
+
+.trail-flow .node-circle.done {
+    background: #10b981;
+    border-color: #10b981;
+    color: #fff;
+}
+
+.trail-flow .node-circle.current {
+    background: #f59e0b;
+    border-color: #f59e0b;
+    color: #fff;
+    animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+.trail-flow .node-circle.pending {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text-muted);
+}
+
+.trail-flow .node-circle.rejected {
+    background: #ef4444;
+    border-color: #ef4444;
+    color: #fff;
+}
+
+.trail-flow .trail-arrow {
+    font-size: 16px;
+    color: var(--text-muted);
+    margin: 0 -2px;
+}
+
+.trail-flow .trail-node-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.trail-flow .trail-node-label {
+    font-size: 10px;
+    color: var(--text-secondary);
+    text-align: center;
+    max-width: 56px;
+    line-height: 1.2;
+}
+
+/* ── Step timing ── */
+
+.trail-step-time {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* ── Admin Dashboard Events Timeline ── */
+
+.events-timeline {
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.event-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+
+.event-item:last-child {
+    border-bottom: none;
+}
+
+.event-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 4px;
+    flex-shrink: 0;
+}
+
+.event-dot.created { background: #3b82f6; }
+.event-dot.approved { background: #10b981; }
+.event-dot.rejected { background: #ef4444; }
+.event-dot.changed { background: #f59e0b; }
+
+.event-time {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.event-detail {
+    flex: 1;
+}

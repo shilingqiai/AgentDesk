@@ -236,16 +236,24 @@
     // ReAct Thinking Chain Panel (防坑2: 滚动锁定 + 完成后自动折叠)
     // ============================================================
 
+    // v12: React 步骤计数器
+    let reactStepCount = 0;
+    let reactToolCallCount = 0;
+
     function ensureReactPanel() {
         if (!currentBotBubble) return;
         if (!currentReactPanel) {
+            reactStepCount = 0;
+            reactToolCallCount = 0;
             currentReactPanel = document.createElement('div');
             currentReactPanel.className = 'react-panel';
             currentReactPanel.innerHTML = `
                 <div class="react-header" onclick="toggleReact(this)">
                     <i class="fas fa-chevron-down"></i> 🧠 思考过程
+                    <span class="react-step-badge" style="display:none;"></span>
                 </div>
-                <div class="react-steps"></div>`;
+                <div class="react-steps"></div>
+                <div class="react-footer" style="display:none;"></div>`;
             // Insert BEFORE any orch-block or text nodes
             const firstChild = currentBotBubble.firstChild;
             if (firstChild) {
@@ -261,41 +269,80 @@
         ensureReactPanel();
         if (!currentReactSteps) return;
 
-        const step = document.createElement('div');
+        reactStepCount++;
         const eventType = data.event || '';
         let icon, text, cls;
+
+        // v12: 增强图标和颜色编码
         if (eventType === 'thought') {
             icon = '💭'; text = data.text || ''; cls = 'thought';
         } else if (eventType === 'tool_call') {
+            reactToolCallCount++;
             icon = '🔧'; text = data.text || `调用 ${data.tool || '?'}`; cls = 'tool_call';
         } else if (eventType === 'tool_result') {
-            icon = '✅'; text = data.text || ''; cls = 'tool_result';
+            // 判断成功/失败
+            var isError = data.text && (data.text.indexOf('❌') === 0 || data.text.indexOf('失败') >= 0);
+            icon = isError ? '❌' : '✅';
+            text = data.text || ''; cls = isError ? 'tool_error' : 'tool_result';
+        } else if (eventType === 'final') {
+            icon = '✨'; text = data.text || ''; cls = 'final';
+            // 更新 header 显示迭代次数
+            var badge = currentReactPanel.querySelector('.react-step-badge');
+            if (badge && data.iterations) {
+                badge.style.display = '';
+                badge.textContent = data.iterations + '轮 · ' + reactToolCallCount + '工具';
+            }
         } else {
             icon = '·'; text = JSON.stringify(data); cls = '';
         }
+
+        var step = document.createElement('div');
         step.className = 'react-step ' + cls;
-        step.innerHTML = `<span class="react-icon">${icon}</span><span>${escapeHtml(text)}</span>`;
+        step.innerHTML = '<span class="react-step-num">' + reactStepCount + '</span>' +
+            '<span class="react-icon">' + icon + '</span>' +
+            '<span class="react-text">' + escapeHtml(text) + '</span>';
         currentReactSteps.appendChild(step);
 
-        // 防坑2: 流式期间强制滚动到底部
         scrollToBottom();
     }
 
     function toggleReact(header) {
         header.classList.toggle('collapsed');
-        const steps = header.nextElementSibling;
-        if (steps) steps.style.display = steps.style.display === 'none' ? '' : 'none';
+        var steps = header.nextElementSibling;
+        if (steps && steps.classList.contains('react-steps')) {
+            steps.style.display = steps.style.display === 'none' ? '' : 'none';
+        }
+        var footer = currentReactPanel ? currentReactPanel.querySelector('.react-footer') : null;
+        if (footer) {
+            footer.style.display = footer.style.display === 'none' ? '' : 'none';
+        }
     }
 
     function collapseReactPanel() {
-        // 防坑2: 流式结束后自动折叠思考面板，节省屏幕空间
+        // v12: 完成后不隐藏面板，改为折叠+显示摘要
         if (currentReactPanel) {
-            const header = currentReactPanel.querySelector('.react-header');
+            var header = currentReactPanel.querySelector('.react-header');
+            var footer = currentReactPanel.querySelector('.react-footer');
+            var steps = currentReactPanel.querySelector('.react-steps');
+
+            // 显示摘要 footer
+            if (footer) {
+                footer.style.display = '';
+                footer.innerHTML = '<i class="fas fa-check-circle" style="color:var(--success);"></i> ' +
+                    '共 <b>' + reactStepCount + '</b> 步推理 · ' +
+                    '<b>' + reactToolCallCount + '</b> 个工具调用 · 完成';
+            }
+
+            // 折叠 (但保持 header 可见)
             if (header && !header.classList.contains('collapsed')) {
                 header.classList.add('collapsed');
-                const steps = currentReactPanel.querySelector('.react-steps');
-                if (steps) steps.style.display = 'none';
             }
+            if (steps) steps.style.display = 'none';
+            if (footer) footer.style.display = '';
+
+            // 重置计数器
+            reactStepCount = 0;
+            reactToolCallCount = 0;
         }
     }
 

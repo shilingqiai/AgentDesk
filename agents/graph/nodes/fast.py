@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import time as _time
 from langgraph.config import get_stream_writer
 from agents.graph.state import (
     TicketState, _get_user_text, _build_conversation_context, _generate_rag_topic,
@@ -15,6 +16,9 @@ from agents.graph.state import (
 )
 
 logger = logging.getLogger("graph.nodes.fast")
+
+# ══ 延迟诊断开关 ══
+_LATENCY_DEBUG = True
 
 
 async def fast_track_node(state: TicketState) -> TicketState:
@@ -40,10 +44,16 @@ async def fast_track_node(state: TicketState) -> TicketState:
         return state
 
     try:
+        _t_init = _time.time()
         await agent_instance._ensure_initialized()
+        if _LATENCY_DEBUG:
+            logger.info(f"[⏱️ LATENCY] RAG _ensure_initialized: {_time.time() - _t_init:.2f}s")
 
         # 检索
+        _t_search = _time.time()
         docs = await agent_instance.knowledge_service.search(user_text, top_k=5)
+        if _LATENCY_DEBUG:
+            logger.info(f"[⏱️ LATENCY] RAG FAISS search: {_time.time() - _t_search:.2f}s, docs={len(docs)}")
 
         writer = get_stream_writer()
         full_response = ""
@@ -63,11 +73,16 @@ async def fast_track_node(state: TicketState) -> TicketState:
                 )
 
             # 真流式 token 发射
+            _t_llm = _time.time()
             async for token in agent_instance._synthesize_stream(
                 user_text, docs, conversation_history,
             ):
+                if _LATENCY_DEBUG and full_response == "":
+                    logger.info(f"[⏱️ LATENCY] RAG LLM首token: {_time.time() - _t_llm:.2f}s")
                 full_response += token
                 writer(token)
+            if _LATENCY_DEBUG:
+                logger.info(f"[⏱️ LATENCY] RAG LLM总耗时: {_time.time() - _t_llm:.2f}s, tokens={len(full_response)}")
 
         # 流式完成后设置状态
         state["final_response"] = full_response.strip()

@@ -190,6 +190,7 @@ function renderWorkflowTrail(wf) {
     wf.steps.forEach((step, i) => {
         let cls = 'pending';
         let icon = step.step_order;
+        let tooltip = '';
         if (step.status === 'approved')  { cls = 'done';     icon = '✓'; }
         if (step.status === 'rejected')  { cls = 'rejected'; icon = '✗'; }
         // 找到当前待审批步骤
@@ -198,11 +199,19 @@ function renderWorkflowTrail(wf) {
             if (prevAllDone) { cls = 'current'; icon = '⏳'; }
         }
 
+        // Tooltip: 审批时间 + 批注
+        if (step.decided_at) {
+            const d = new Date(step.decided_at);
+            const timeStr = d.toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+            tooltip = ` title="${escapeHtml(step.approver)} — ${timeStr}${step.comment ? '\\n' + escapeHtml(step.comment) : ''}"`;
+        }
+
         const arrow = i > 0 ? '<span class="wf-arrow">→</span>' : '';
         html += `${arrow}
-        <div class="wf-node">
+        <div class="wf-node"${tooltip}>
             <div class="wf-dot ${cls}">${icon}</div>
             <div class="wf-node-label">${escapeHtml(step.approver)}</div>
+            ${step.decided_at ? `<div class="trail-step-time">${_fmtTimeDelta(step.created_at, step.decided_at)}</div>` : ''}
         </div>`;
     });
 
@@ -228,4 +237,18 @@ function renderWorkflowTrail(wf) {
         </div>`;
     }
     return html;
+}
+
+/** 计算审批步骤耗时（created_at → decided_at） */
+function _fmtTimeDelta(createdAt, decidedAt) {
+    if (!createdAt || !decidedAt) return '';
+    try {
+        const start = new Date(createdAt);
+        const end = new Date(decidedAt);
+        const diffMin = Math.round((end - start) / 60000);
+        if (diffMin < 60) return diffMin + 'min';
+        const h = Math.floor(diffMin / 60);
+        const m = diffMin % 60;
+        return h + 'h' + (m > 0 ? ' ' + m + 'min' : '');
+    } catch(e) { return ''; }
 }

@@ -5,7 +5,8 @@
 - 审批链规则 100% 确定性，保证合规可审计
 - 串行审批: 当前节点通过后自动推进到下一节点
 - 任一节点驳回 → 整个审批流标记为 rejected
-- 最后节点通过 → 审批流标记为 approved → 工单自动执行
+- 最后节点通过 → 审批流标记为 approved → 工单自动推进
+- 权限控制: 仅当前步骤的审批人可操作（approver_name 校验）
 """
 
 from __future__ import annotations
@@ -14,7 +15,26 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+import asyncio
+
+from services.ticket_state import TicketStatus
+from services.workflow_service import WorkflowService
+from services.event_bus import EventBus, EventType
+
 logger = logging.getLogger("approval.engine")
+
+
+def _emit_event(event_type: str, **data):
+    """安全地发射事件 — 从同步代码中调度异步 emit（fire-and-forget）"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(EventBus.emit(event_type, **data))
+        else:
+            asyncio.run(EventBus.emit(event_type, **data))
+    except RuntimeError:
+        # 没有事件循环（测试环境），静默跳过
+        pass
 
 # ── 审批链规则（确定性，可配置）──────────────────────────
 
@@ -127,12 +147,22 @@ class ApprovalEngine:
 
     @staticmethod
     def approve_step(workflow_id: int, step_order: int, comment: str = "",
-                     db_session=None) -> dict:
+                     approver_name: str = "", db_session=None) -> dict:
         """
         审批通过当前节点 → 推进到下一步或完成。
 
+        Args:
+            workflow_id:   审批流 ID
+            step_order:    审批步骤序号
+            comment:       审批意见
+            approver_name: 操作人姓名（必须匹配当前步骤审批人，防止越级审批）
+            db_session:    SQLAlchemy session
+
         Returns:
             {"workflow_status": "pending"|"approved", "next_step": int|None}
+
+        Raises:
+            PermissionError: 操作人不是当前步骤的审批人
         """
         from db.models import ApprovalWorkflow, ApprovalStep
 
@@ -153,6 +183,13 @@ class ApprovalEngine:
         if step.status != "pending":
             raise ValueError(f"该节点已处理: {step.status}")
 
+        # ── 权限校验: 仅当前步骤的审批人可操作 ──
+        if approver_name and approver_name != step.approver:
+            raise PermissionError(
+                f"当前步骤审批人是 {step.approver}，"
+                f"{approver_name} 无权操作（等待上一步审批人操作）"
+            )
+
         step.status = "approved"
         step.comment = comment
         step.decided_at = datetime.now(timezone.utc)
@@ -163,20 +200,48 @@ class ApprovalEngine:
             workflow.updated_at = datetime.now(timezone.utc)
             db_session.commit()
 
-            # 更新关联工单状态为 processing + 追加 history
+            # 工单状态: PENDING_APPROVAL → APPROVED（或 CREATED → APPROVED 兼容旧数据）
             from db.models import Ticket
             ticket = db_session.query(Ticket).filter(
                 Ticket.id == workflow.ticket_id,
             ).first()
             if ticket:
-                if ticket.status == "created":
-                    ticket.status = "processing"
+                current_status = ticket.status
+                # 兼容旧数据: 如果工单还在 "created" 状态，先转到 PENDING_APPROVAL
+                if current_status == "created":
+                    WorkflowService.transition(
+                        ticket_id=ticket.id,
+                        to_status=TicketStatus.PENDING_APPROVAL,
+                        comment="进入审批流程（兼容转换）",
+                        db_session=db_session,
+                    )
+                # 审批通过: PENDING_APPROVAL → APPROVED
+                WorkflowService.transition(
+                    ticket_id=ticket.id,
+                    to_status=TicketStatus.APPROVED,
+                    comment=f"全部审批通过 (共 {workflow.total_steps} 步)",
+                    db_session=db_session,
+                )
                 ticket.current_approver = ""
                 _append_ticket_history(ticket, "approved", step.approver,
                                        f"全部审批通过 (共 {workflow.total_steps} 步)")
 
             db_session.commit()
             logger.info(f"[Approval] 审批流 {workflow_id} 全部通过 → approved")
+
+            # ── 事件: 审批完成 ──
+            from db.models import Ticket as _Ticket
+            _ticket = db_session.query(_Ticket).filter(
+                _Ticket.id == workflow.ticket_id,
+            ).first()
+            _emit_event(EventType.APPROVAL_COMPLETED,
+                        ticket_id=workflow.ticket_id,
+                        ticket_number=_ticket.ticket_number if _ticket else "",
+                        workflow_id=workflow_id,
+                        total_steps=workflow.total_steps,
+                        requester_name=_ticket.requester_name if _ticket else "",
+                        operator=step.approver)
+
             return {"workflow_status": "approved", "next_step": None}
 
         # 推进到下一步
@@ -206,6 +271,20 @@ class ApprovalEngine:
             f"[Approval] 审批流 {workflow_id} step {step_order} 通过, "
             f"→ step {next_step} ({next_approver.approver if next_approver else '完成'})"
         )
+
+        # ── 事件: 审批步骤通过 ──
+        from db.models import Ticket as _T2
+        _t2 = db_session.query(_T2).filter(_T2.id == workflow.ticket_id).first()
+        _emit_event(EventType.APPROVAL_STEP_APPROVED,
+                    ticket_id=workflow.ticket_id,
+                    ticket_number=_t2.ticket_number if _t2 else "",
+                    workflow_id=workflow_id,
+                    step_order=step_order,
+                    total_steps=workflow.total_steps,
+                    approver=step.approver,
+                    next_approver=next_approver.approver if next_approver else None,
+                    operator=step.approver)
+
         return {
             "workflow_status": "pending",
             "next_step": next_step,
@@ -215,9 +294,19 @@ class ApprovalEngine:
 
     @staticmethod
     def reject_step(workflow_id: int, step_order: int, comment: str = "",
-                    db_session=None) -> dict:
+                    approver_name: str = "", db_session=None) -> dict:
         """
         驳回当前节点 → 整个审批流标记为 rejected。
+
+        Args:
+            workflow_id:   审批流 ID
+            step_order:    审批步骤序号
+            comment:       驳回理由
+            approver_name: 操作人姓名（必须匹配当前步骤审批人，防止越级审批）
+            db_session:    SQLAlchemy session
+
+        Raises:
+            PermissionError: 操作人不是当前步骤的审批人
         """
         from db.models import ApprovalWorkflow, ApprovalStep
 
@@ -234,6 +323,13 @@ class ApprovalEngine:
         if not step:
             raise ValueError(f"审批节点不存在")
 
+        # ── 权限校验: 仅当前步骤的审批人可操作 ──
+        if approver_name and approver_name != step.approver:
+            raise PermissionError(
+                f"当前步骤审批人是 {step.approver}，"
+                f"{approver_name} 无权操作（等待上一步审批人操作）"
+            )
+
         step.status = "rejected"
         step.comment = comment
         step.decided_at = datetime.now(timezone.utc)
@@ -242,13 +338,29 @@ class ApprovalEngine:
         workflow.updated_at = datetime.now(timezone.utc)
         db_session.commit()
 
-        # 更新工单 current_approver + history
+        # 更新工单: → REJECTED（修复旧 bug: 驳回后工单状态不变）
         from db.models import Ticket
         ticket = db_session.query(Ticket).filter(
             Ticket.id == workflow.ticket_id,
         ).first()
         if ticket:
             ticket.current_approver = ""
+            current_status = ticket.status
+            # 兼容旧数据: 如果工单还在 "created" 状态，先转到 PENDING_APPROVAL
+            if current_status == "created":
+                WorkflowService.transition(
+                    ticket_id=ticket.id,
+                    to_status=TicketStatus.PENDING_APPROVAL,
+                    comment="进入审批流程（兼容转换）",
+                    db_session=db_session,
+                )
+            # 驳回: PENDING_APPROVAL → REJECTED
+            WorkflowService.transition(
+                ticket_id=ticket.id,
+                to_status=TicketStatus.REJECTED,
+                comment=comment or f"步骤 {step_order}/{workflow.total_steps} 被 {step.approver} 驳回",
+                db_session=db_session,
+            )
             _append_ticket_history(ticket, "rejected", step.approver,
                                    comment or f"步骤 {step_order}/{workflow.total_steps} 被驳回")
         db_session.commit()
@@ -256,6 +368,18 @@ class ApprovalEngine:
         logger.info(
             f"[Approval] 审批流 {workflow_id} step {step_order} 被驳回: {comment[:60]}"
         )
+
+        # ── 事件: 审批驳回 ──
+        _emit_event(EventType.APPROVAL_REJECTED,
+                    ticket_id=workflow.ticket_id,
+                    ticket_number=ticket.ticket_number if ticket else "",
+                    workflow_id=workflow_id,
+                    step_order=step_order,
+                    total_steps=workflow.total_steps,
+                    approver=step.approver,
+                    reason=comment,
+                    operator=step.approver)
+
         return {"workflow_status": "rejected", "reason": comment}
 
     @staticmethod

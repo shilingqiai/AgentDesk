@@ -47,7 +47,7 @@ class Ticket(Base):
     priority = Column(String(10), nullable=False, default="P2",
                       comment="P0=紧急 P1=高 P2=中 P3=低")
     status = Column(String(20), nullable=False, default="created",
-                    comment="created→assigned→processing→resolved→closed")
+                    comment="created→pending_approval→approved→processing→completed | rejected")
     requester_id = Column(String(50), nullable=True, default="")
     requester_name = Column(String(50), nullable=True, default="")
     assigned_to = Column(String(50), nullable=True, default="")
@@ -202,3 +202,25 @@ class InventoryItem(Base):
     is_active = Column(Integer, default=1)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class AuditLog(Base):
+    """
+    审计日志模型 (v12 新增) — Event-Driven Architecture
+
+    记录所有系统事件，用于合规审计和问题追溯。
+    由 AuditHandler 通过 EventBus 订阅自动写入。
+    """
+    __tablename__ = 'audit_logs'
+
+    id = Column(Integer, primary_key=True)
+    event = Column(String(50), nullable=False, index=True,
+                   comment="事件类型: ticket.created / approval.completed 等")
+    ticket_id = Column(Integer, nullable=True, index=True,
+                       comment="关联工单 ID")
+    ticket_number = Column(String(30), nullable=True, default="",
+                           comment="关联工单号")
+    operator = Column(String(50), nullable=True, default="system",
+                      comment="操作人")
+    data = Column(JSON, nullable=True, comment="事件附加数据")
+    created_at = Column(DateTime, default=_utcnow)

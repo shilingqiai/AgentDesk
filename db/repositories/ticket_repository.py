@@ -184,7 +184,20 @@ class TicketRepository:
     def update_status(
         self, ticket_id: int, new_status: str, assigned_to: str = None,
     ) -> bool:
-        """更新工单状态（便捷方法）"""
+        """更新工单状态（便捷方法）
+
+        注意: 此方法不校验状态转换合法性（由 WorkflowService.transition() 负责）。
+        仅校验 new_status 是否为合法的 TicketStatus 枚举值。
+        推荐使用 WorkflowService.transition() 替代直接调用此方法。
+        """
+        from services.ticket_state import TicketStatus
+        try:
+            TicketStatus(new_status)
+        except ValueError:
+            valid = [s.value for s in TicketStatus]
+            raise ValueError(
+                f"无效的工单状态: '{new_status}'，合法值: {valid}"
+            )
         updates = {"status": new_status}
         if assigned_to:
             updates["assigned_to"] = assigned_to

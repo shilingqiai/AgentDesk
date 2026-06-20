@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from db.db_router import DatabaseRouter
+from services.ticket_state import TicketStatus
 
 router = APIRouter(prefix="/api/tickets", tags=["工单管理"])
 
@@ -38,7 +39,8 @@ class TicketCreateRequest(BaseModel):
 
 class TicketStatusUpdate(BaseModel):
     """状态更新请求"""
-    status: str = Field(..., description="新状态: created/assigned/processing/resolved/closed")
+    status: str = Field(...,
+        description="新状态: created/pending_approval/approved/rejected/processing/completed")
     assigned_to: Optional[str] = Field(default=None, description="指派人")
 
 
@@ -324,7 +326,7 @@ async def approve_ticket(
 
         success = db.ticket.update_status(
             ticket_id=ticket_id,
-            new_status="resolved",
+            new_status=TicketStatus.COMPLETED.value,
             assigned_to=resolved_user,
         )
         if not success:
@@ -377,7 +379,7 @@ async def reject_ticket(
         payload["rejected_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         payload["reject_reason"] = reason or "未提供理由"
 
-        db.ticket.update_ticket(ticket_id, status="closed", payload=payload)
+        db.ticket.update_ticket(ticket_id, status=TicketStatus.REJECTED.value, payload=payload)
 
         return {
             "status": "success",
@@ -407,3 +409,86 @@ async def delete_ticket(ticket_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════
+# Admin Dashboard
+# ═══════════════════════════════════════════════════════
+
+@router.get("/dashboard", summary="Admin Dashboard 统计数据")
+async def admin_dashboard():
+    """
+    返回 Admin 面板所需的所有统计数据。
+
+    合并传统 DB 统计 + EventBus DashboardHandler 内存计数。
+    """
+    try:
+        db = DatabaseRouter()
+
+        # DB 统计
+        stats = db.ticket.get_stats()
+
+        # 在途审批数
+        from db.db_router import DatabaseRouter as DR
+        db2 = DR()
+        try:
+            session = db2.session_manager.Session()
+            from db.models import ApprovalWorkflow
+            pending_count = session.query(ApprovalWorkflow).filter(
+                ApprovalWorkflow.status == "pending",
+            ).count()
+            session.close()
+        except Exception:
+            pending_count = 0
+
+        # EventBus 事件计数
+        try:
+            from services.event_handlers import DashboardHandler
+            event_stats = DashboardHandler.get_stats()
+        except Exception:
+            event_stats = {"counters": {}, "recent_events": []}
+
+        return {
+            "status": "success",
+            "data": {
+                "total_tickets": stats["total"],
+                "today_new": stats["today"],
+                "pending_approval": pending_count,
+                "by_type": stats["by_type"],
+                "by_status": stats["by_status"],
+                "by_priority": stats["by_priority"],
+                "event_counters": event_stats.get("counters", {}),
+                "recent_events": event_stats.get("recent_events", []),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取统计数据失败: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════
+# SLA 状态
+# ═══════════════════════════════════════════════════════
+
+@router.get("/admin/sla/status", summary="SLA 状态概览")
+async def sla_status():
+    """
+    返回 SLA 引擎的状态概览。
+
+    包含:
+    - 超时工单数
+    - 预警工单数
+    - 在途 SLA 数
+    - 超时工单列表
+    - 审批节点 SLA 状态
+    - SLA 规则配置
+    """
+    try:
+        from services.sla_engine import SLAEngine
+
+        summary = await SLAEngine.get_sla_summary()
+        return {
+            "status": "success",
+            "data": summary,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取 SLA 状态失败: {str(e)}")

@@ -4,7 +4,12 @@ import numpy as np
 import faiss
 import os
 import pickle
+import time as _time
+import logging
 from config.model_provider import create_embedding_model
+
+_logger = logging.getLogger("text_embedding")
+_LATENCY_DEBUG = True
 
 
 def find_best_match_indices(text: str, candidates: list) -> list:
@@ -31,8 +36,28 @@ def find_best_match_indices(text: str, candidates: list) -> list:
 def embed_input(input_text: str, model: str = "text-embedding-ada-002",
                 encoding_format: str = "float", dimensions: int = None,
                 timeout: int = 600) -> list:
-    embeddings = create_embedding_model()
-    return embeddings.embed_query(input_text)
+    if _LATENCY_DEBUG:
+        _t0 = _time.time()
+    if _embedding_model_cache is None:
+        _init_embedding_model()
+    if _LATENCY_DEBUG:
+        _t1 = _time.time()
+    result = _embedding_model_cache.embed_query(input_text)
+    if _LATENCY_DEBUG:
+        _t2 = _time.time()
+        _logger.info(f"[LATENCY] embed_input: create={_t1 - _t0:.2f}s, API={_t2 - _t1:.2f}s, total={_t2 - _t0:.2f}s, text='{input_text[:40]}'")
+    return result
+
+
+# Module-level embedding model cache — avoids creating new instance on every call
+_embedding_model_cache = None
+
+
+def _init_embedding_model():
+    global _embedding_model_cache
+    if _embedding_model_cache is None:
+        _embedding_model_cache = create_embedding_model()
+        _logger.info("Embedding model cached (singleton)")
 
 
 def save_technician_embeddings(embeddings, indices, path="data/technician_embeddings.pkl"):

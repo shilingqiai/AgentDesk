@@ -72,134 +72,16 @@ class ReActState(BaseModel):
 # 工具定义 — 统一注册到 tool_registry
 # ============================================================
 
-class ToolDefinition(BaseModel):
-    """工具定义"""
-    name: str
-    description: str
-    parameters: dict = Field(default_factory=dict)  # JSON Schema
-
-
-DYNAMIC_ACTION_TOOLS = [
-    ToolDefinition(
-        name="check_inventory",
-        description=(
-            "查询办公物品库存数量。参数 keyword: 物品关键词，支持模糊搜索"
-            "（如'笔记本''显示器''ThinkPad''键鼠'）。"
-            "返回匹配物品的库存数量、最低阈值、单价、供应商信息。"
-            "库存数 ≤ 最低阈值时为预警状态，需考虑采购。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "keyword": {"type": "string", "description": "物品关键词，如'笔记本''显示器''ThinkPad''键鼠套装'"},
-            },
-            "required": ["keyword"],
-        },
-    ),
-    ToolDefinition(
-        name="web_search",
-        description=(
-            "在网上搜索信息，获取市场资讯、产品推荐、价格对比等外部数据。"
-            "适用于：产品型号推荐、市场价格查询、技术方案对比、供应商信息搜索。"
-            "返回搜索结果摘要和来源链接。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "搜索查询词，如'2026年前端开发推荐显示器型号'"},
-            },
-            "required": ["query"],
-        },
-    ),
-    ToolDefinition(
-        name="check_leave_balance",
-        description="查询员工的假期余额。参数 user_name: 员工姓名。返回年假/病假等各类假期余额。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "user_name": {"type": "string", "description": "员工姓名"},
-            },
-            "required": ["user_name"],
-        },
-    ),
-    ToolDefinition(
-        name="check_ticket_status",
-        description="查询工单的处理状态。参数 ticket_number: 工单号。返回工单状态、处理人、进度。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "ticket_number": {"type": "string", "description": "工单号"},
-            },
-            "required": ["ticket_number"],
-        },
-    ),
-    ToolDefinition(
-        name="search_knowledge_base",
-        description="搜索企业知识库。参数 query: 搜索问题。返回相关文档内容和来源。"
-                    "适用于查询政策、流程、故障排查方法等。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "搜索查询"},
-            },
-            "required": ["query"],
-        },
-    ),
-    ToolDefinition(
-        name="search_meeting_rooms",
-        description="搜索可用会议室。参数: date(日期YYYY-MM-DD), start_time(HH:MM), end_time(HH:MM), "
-                    "capacity(可选,人数需求)。返回可用会议室列表及设备信息。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "date": {"type": "string", "description": "日期 YYYY-MM-DD"},
-                "start_time": {"type": "string", "description": "开始时间 HH:MM"},
-                "end_time": {"type": "string", "description": "结束时间 HH:MM"},
-                "capacity": {"type": "integer", "description": "人数需求（可选）"},
-            },
-            "required": ["date", "start_time", "end_time"],
-        },
-    ),
-    ToolDefinition(
-        name="create_ticket",
-        description=(
-            "【提议阶段】提出一个工单创建建议。此工具不会立即创建工单，"
-            "而是将提议记录下来。在所有信息收集完成后，系统会将提议合并为确认卡片，"
-            "等待用户确认后才执行。\n"
-            "同类工单会自动合并（如多个领用物品→一个领用单，多个采购物品→一个采购单）。\n\n"
-            "参数说明:\n"
-            "- ticket_type: it_fault(IT故障) | leave(请假) | expense(报销) | admin(行政)\n"
-            "- title: 工单标题\n"
-            "- description: 详细描述\n"
-            "- priority: P0-P3（默认P2）\n"
-            "- extra: 扩展字段，按 ticket_type 填写:\n"
-            "  * leave: {\"leave_type\":\"病假|年假|事假|调休\", \"start_date\":\"YYYY-MM-DD\", "
-            "\"end_date\":\"YYYY-MM-DD\", \"total_days\":N}\n"
-            "    务必从对话历史中提取天数、日期、类型，不要遗漏！\n"
-            "    例: 用户说\"请4天病假明天开始\" → total_days=4, leave_type=病假, start_date=明天\n"
-            "  * expense: {\"expense_type\":\"差旅|办公|餐费|其他\", \"amount\":N, \"description\":\"...\"}\n"
-            "  * admin: {\"service_type\":\"资产领用|asset_requisition|采购申请|procurement|...\"}\n"
-            "  * it_fault: {\"category\":\"硬件|软件|网络|账号\", \"urgency\":\"high|medium|low\"}\n"
-            "返回: 提议的工单摘要（状态=proposed，等待用户确认）"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "ticket_type": {
-                    "type": "string",
-                    "enum": ["it_fault", "leave", "expense", "admin"],
-                },
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "priority": {
-                    "type": "string",
-                    "enum": ["P0", "P1", "P2", "P3"],
-                },
-                "extra": {"type": "object"},
-            },
-            "required": ["ticket_type", "title", "description"],
-        },
-    ),
+# ══ 工具定义已迁移至 agents/tools/dynamic_tools.py + tool_registry ══
+# create_ticket 保留 Agent 内联处理（需要 A2A 委派 + 提案上下文）
+_DYNAMIC_TOOL_NAMES = [
+    "check_inventory",
+    "web_search",
+    "check_leave_balance",
+    "check_ticket_status",
+    "search_knowledge_base",
+    "search_meeting_rooms",
+    "create_ticket",
 ]
 
 
@@ -374,22 +256,11 @@ class DynamicActionAgent(BaseSubAgent):
     # ================================================================
 
     def _build_tool_schemas(self) -> list[dict]:
-        """将 ToolDefinition 转为 OpenAI Function Calling 格式"""
-        schemas = []
-        for tool in DYNAMIC_ACTION_TOOLS:
-            schemas.append({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": tool.parameters.get("properties", {}),
-                        "required": tool.parameters.get("required", []),
-                    },
-                },
-            })
-        return schemas
+        """从 ToolRegistry 获取所有 dynamic 工具 → OpenAI Function Calling 格式"""
+        # 确保 dynamic_tools 已导入（触发 @tool_registry.register）
+        import agents.tools.dynamic_tools as _dt  # noqa: F401
+        from agents.tools import tool_registry
+        return tool_registry.get_tools_as_openai_schemas()
 
     def _build_system_prompt(self, user_name: str = "") -> str:
         from datetime import datetime
@@ -486,19 +357,25 @@ class DynamicActionAgent(BaseSubAgent):
         )
         import asyncio as _asyncio
 
-        # ── 工具路由映射 ──
-        _tool_map = {
-            "check_inventory": self._tool_check_inventory,
-            "web_search": self._tool_web_search,
-            "check_leave_balance": self._tool_check_leave_balance,
-            "check_ticket_status": self._tool_check_ticket_status,
-            "search_knowledge_base": self._tool_search_knowledge,
-            "search_meeting_rooms": self._tool_search_meeting_rooms,
-            "create_ticket": self._tool_create_ticket,
-        }
+        # ── 工具路由: create_ticket 走 Agent 内联（需要 A2A + 提案上下文），其余走 ToolRegistry ──
+        from agents.tools import tool_registry as _tr
 
-        tool_fn = _tool_map.get(name)
-        if tool_fn is None:
+        if name == "create_ticket":
+            tool_fn = self._tool_create_ticket
+        elif _tr.get_tool(name) is not None:
+            # 适配器: ToolRegistry.invoke() → JSON 字符串（兼容重试循环）
+            async def _registry_adapter(a):
+                result = await _tr.invoke(name, **a)
+                if result.success:
+                    # ToolResult.data 是 dict → 转 JSON 字符串
+                    if isinstance(result.data, str):
+                        return result.data
+                    return json.dumps(result.data, ensure_ascii=False)
+                # 失败 → 抛异常，让重试循环处理
+                raise RuntimeError(result.error or f"工具 {name} 执行失败")
+
+            tool_fn = _registry_adapter
+        else:
             return json.dumps({"error": True, "error_type": "validation",
                                "message": f"未知工具: {name}",
                                "suggestion": "检查可用工具列表"}, ensure_ascii=False)
@@ -735,6 +612,20 @@ class DynamicActionAgent(BaseSubAgent):
           TicketDispatch 落库到 DB → 返回工单号。
         """
         from agents.a2a.protocol import AgentMessage as AM
+
+        # v12-fix: LLM 可能传字符串而非 dict → 容错解析
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not isinstance(args, dict):
+            return json.dumps({
+                "status": "error",
+                "error_type": "validation",
+                "message": f"create_ticket 需要结构化参数（title/description），收到了纯文本。请重新整理参数。",
+                "raw_type": type(args).__name__,
+            }, ensure_ascii=False)
 
         ticket_type = args.get("ticket_type", "admin")
         title = args.get("title", "")
@@ -1419,7 +1310,12 @@ class DynamicActionAgent(BaseSubAgent):
 
         error = data.get("error", "")
         if error:
-            return f"❌ {tool_name} 失败: {error[:100]}"
+            if isinstance(error, bool):
+                # 工具返回 {"error": True, "message": "..."} 格式
+                msg = data.get("message", "未知错误")
+                return f"❌ {tool_name} 失败: {msg[:100]}"
+            error_str = str(error)
+            return f"❌ {tool_name} 失败: {error_str[:100]}"
 
         if tool_name == "check_inventory":
             items = data.get("items", [])

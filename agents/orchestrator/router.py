@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time as _time
 from dataclasses import dataclass, field
 from typing import Optional, Literal
 
@@ -26,6 +27,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from config.model_provider import create_chat_model
 
 logger = logging.getLogger("orchestrator.router")
+
+# ══ 延迟诊断开关 ══
+_LATENCY_DEBUG = True
 
 
 # ============================================================
@@ -176,7 +180,7 @@ class Router:
     """
 
     def __init__(self, llm: BaseChatModel = None):
-        base_llm = llm or create_chat_model(model_type="main", temperature=0)
+        base_llm = llm or create_chat_model(model_type="router", temperature=0)
         self.llm = base_llm
         # bind_tools + auto: DashScope 已验证全支持（auto/required/object）
         self.llm_with_tools = base_llm.bind_tools(
@@ -291,7 +295,10 @@ class Router:
 
         try:
             # ── 主路径：Function Calling ──
+            _t_llm = _time.time()
             response = await self.llm_with_tools.ainvoke(messages)
+            if _LATENCY_DEBUG:
+                logger.info(f"[⏱️ LATENCY] Router LLM调用: {_time.time() - _t_llm:.2f}s (model={getattr(self.llm, 'model_name', '?')})")
             self.last_response = response  # 供 Token Budget 扣减
 
             if response.tool_calls:

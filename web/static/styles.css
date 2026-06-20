@@ -784,6 +784,40 @@ body {
 .react-panel .react-step.thought { color: #636e72; font-style: italic; }
 .react-panel .react-step.tool_call { color: #0984e3; }
 .react-panel .react-step.tool_result { color: #00b894; }
+.react-panel .react-step.tool_error { color: #e17055; }
+.react-panel .react-step.final { color: #6c5ce7; font-weight: 500; }
+
+/* v12: 步骤编号 */
+.react-panel .react-step .react-step-num {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    line-height: 20px;
+    text-align: center;
+    font-size: 10px;
+    font-weight: 600;
+    background: var(--bg-input);
+    border-radius: 50%;
+    color: var(--text-secondary);
+}
+.react-panel .react-step .react-text { flex: 1; }
+
+/* v12: 思考链 footer 摘要 */
+.react-panel .react-footer {
+    padding: 6px 14px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border);
+    background: #f0f2f5;
+}
+.react-panel .react-step-badge {
+    font-size: 10px;
+    background: var(--accent);
+    color: #fff;
+    padding: 1px 8px;
+    border-radius: 10px;
+    margin-left: auto;
+}
 
 /* ---------- Debug Panel ---------- */
 .debug-panel {

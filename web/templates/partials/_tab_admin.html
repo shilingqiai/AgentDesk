@@ -1,4 +1,4 @@
-<!-- _tab_admin.html — Admin Dashboard (v11 enhanced) -->
+<!-- _tab_admin.html — Admin Dashboard (v13 enhanced) -->
 <div>
     <div class="topbar" style="margin-bottom:12px;">
         <span class="topbar-title">⚙ 管理仪表盘</span>
@@ -30,42 +30,37 @@
         <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
     </div>
 
-    <!-- ═══ 3. 审批链规则（只读展示） ═══ -->
-    <div class="section-title">🔗 审批链规则（确定性引擎）</div>
-    <div id="admin-chain-rules" style="margin-bottom:20px;">
-        <div class="approval-card" style="opacity:0.85;">
-            <div class="approval-icon leave"><i class="fas fa-umbrella-beach"></i></div>
-            <div class="approval-body">
-                <div class="ticket-title">请假 (leave)</div>
-                <div class="ticket-meta">
-                    <span>王经理 → 李HR</span>
-                    <span style="color:var(--text-secondary);font-size:11px;">部门经理 → HR</span>
-                </div>
-            </div>
-        </div>
-        <div class="approval-card" style="opacity:0.85;">
-            <div class="approval-icon expense"><i class="fas fa-receipt"></i></div>
-            <div class="approval-body">
-                <div class="ticket-title">报销 / 采购 (expense / purchase)</div>
-                <div class="ticket-meta">
-                    <span>王经理 → 赵财务</span>
-                    <span style="color:var(--text-secondary);font-size:11px;">部门经理 → 财务</span>
-                </div>
-            </div>
-        </div>
-        <div class="approval-card" style="opacity:0.85;">
-            <div class="approval-icon procurement"><i class="fas fa-network-wired"></i></div>
-            <div class="approval-body">
-                <div class="ticket-title">IT 故障 (it_fault)</div>
-                <div class="ticket-meta">
-                    <span>无需审批</span>
-                    <span style="color:var(--text-secondary);font-size:11px;">直接创建工单</span>
-                </div>
-            </div>
-        </div>
+    <!-- ═══ 3. 工具注册中心 ═══ -->
+    <div class="section-title">🔧 Agent 工具注册中心</div>
+    <div id="admin-tools-list" style="margin-bottom:20px;">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
     </div>
 
-    <!-- ═══ 4. 最近工单（全量） ═══ -->
+    <!-- ═══ 3.5. 执行追踪 ═══ -->
+    <div class="section-title">📊 ReAct 执行追踪 <span style="font-size:11px;color:var(--text-muted);font-weight:400;">（最近 N 条）</span></div>
+    <div id="admin-traces-list" style="margin-bottom:20px;">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
+    </div>
+
+    <!-- ═══ 4. SLA 超时告警 ═══ -->
+    <div class="section-title">⏰ SLA 超时监控</div>
+    <div id="admin-sla-status" style="margin-bottom:20px;">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
+    </div>
+
+    <!-- ═══ 4. 审批链实时状态 ═══ -->
+    <div class="section-title">🔗 审批链状态（实时）</div>
+    <div id="admin-approval-chains" style="margin-bottom:20px;">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
+    </div>
+
+    <!-- ═══ 5. 最近事件 ═══ -->
+    <div class="section-title">📡 最近事件</div>
+    <div id="admin-events-timeline" style="margin-bottom:20px;">
+        <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>
+    </div>
+
+    <!-- ═══ 6. 最近工单（全量） ═══ -->
     <div class="section-title">📋 最近工单（全量，不限申请人）</div>
     <div id="admin-recent-tickets">
         <div style="padding:12px;color:var(--text-secondary);font-size:13px;">加载中...</div>

@@ -120,8 +120,8 @@ class TestTicketCRUD:
         repo.add_ticket(ticket_type="it_fault", title="t1", description="d", category="c")
         t2 = repo.add_ticket(ticket_type="it_fault", title="t2", description="d", category="c")
 
-        repo.update_status(t2["id"], "resolved")
-        resolved = repo.list_tickets(status="resolved")
+        repo.update_status(t2["id"], "completed")
+        resolved = repo.list_tickets(status="completed")
         assert len(resolved) == 1
 
     def test_update_status(self, repo):

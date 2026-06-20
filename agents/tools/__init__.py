@@ -99,6 +99,47 @@ class ToolRegistry:
             lines.append(f"- {tool.name}({params_desc}): {tool.description}")
         return "\n".join(lines)
 
+    def get_tools_as_openai_schemas(self, category: str = None) -> list[dict]:
+        """
+        将已注册工具转为 OpenAI Function Calling 格式。
+
+        用于 bind_tools / tool_choice="auto"。
+
+        Args:
+            category: 可选，按分类过滤
+
+        Returns:
+            [{"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}, ...]
+        """
+        schemas = []
+        tools = self.list_tools(category=category)
+        for tool in tools:
+            # 将 ToolRegistry 的 parameters 格式转为 JSON Schema
+            properties = {}
+            required = []
+            for param_name, param_def in tool.parameters.items():
+                properties[param_name] = {
+                    "type": param_def.get("type", "string"),
+                    "description": param_def.get("description", ""),
+                }
+                if param_def.get("required"):
+                    required.append(param_name)
+
+            schema = {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                },
+            }
+            schemas.append(schema)
+        return schemas
+
     async def invoke(self, name: str, **kwargs) -> ToolResult:
         """调用工具"""
         import time

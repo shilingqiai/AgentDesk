@@ -11,6 +11,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import re
+import time as _time
 
 from agents.graph.state import (
     TicketState, _get_user_text, _build_conversation_context,
@@ -19,6 +20,9 @@ from agents.graph.state import (
 )
 
 logger = logging.getLogger("graph.nodes.router")
+
+# ══ 延迟诊断开关 ══
+_LATENCY_DEBUG = True
 
 
 async def route_node(state: TicketState) -> TicketState:
@@ -207,6 +211,7 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
 
     try:
         llm = create_chat_model(model_type="main", temperature=0)
+        _t_llm = _time.time()
         response = await llm.ainvoke([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": (
@@ -215,6 +220,8 @@ async def re_evaluate_node(state: TicketState) -> TicketState:
                 f"返回 JSON：{{\"intent\":\"escalation|follow_up|new_topic|confirm\",\"reason\":\"...\"}}"
             )},
         ])
+        if _LATENCY_DEBUG:
+            logger.info(f"[⏱️ LATENCY] ReEvaluate LLM调用: {_time.time() - _t_llm:.2f}s")
 
         # 解析
         text = response.content.strip()

@@ -168,7 +168,7 @@ class TestProposalVsExecution:
         assert db_ticket is not None
         assert db_ticket["ticket_type"] == "leave"
         assert db_ticket["title"] == "年假申请"
-        assert db_ticket["status"] == "created"
+        assert db_ticket["status"] == "pending_approval"  # 请假工单有审批链，自动进入待审批状态
         assert db_ticket["requester_name"] == "李四"
         assert db_ticket["is_active"] is True
 
@@ -245,9 +245,9 @@ class TestTicketQuery:
         assert updated["status"] == "processing"
         assert updated["assigned_to"] == "engineer1"
 
-        repo.update_status(ticket["id"], "resolved")
+        repo.update_status(ticket["id"], "completed")
         resolved = repo.get_ticket(ticket["id"])
-        assert resolved["status"] == "resolved"
+        assert resolved["status"] == "completed"
 
     def test_delete_ticket_soft(self, in_memory_ticket_repo):
         """软删除后 get_ticket 返回 None"""
@@ -266,11 +266,11 @@ class TestTicketQuery:
         repo.add_ticket(ticket_type="leave", title="B", description="d", category="c",
                         priority="P3", status="created")
         repo.add_ticket(ticket_type="it_fault", title="C", description="d", category="c",
-                        priority="P2", status="resolved")
+                        priority="P2", status="completed")
 
         stats = repo.get_stats()
         assert stats["total"] == 3
         assert stats["by_type"]["it_fault"] == 2
         assert stats["by_type"]["leave"] == 1
         assert stats["by_status"]["created"] == 2
-        assert stats["by_status"]["resolved"] == 1
+        assert stats["by_status"]["completed"] == 1

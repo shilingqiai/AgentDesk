@@ -10,8 +10,10 @@ create_ticket 返回 proposed 时设置 pending_card，由 dynamic_interrupt_nod
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time as _time
 
 from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
@@ -23,6 +25,12 @@ from agents.graph.state import (
 )
 
 logger = logging.getLogger("graph.nodes.dynamic")
+
+# v12: 执行追踪记录
+from services.trace_store import TraceStore
+
+# ══ 延迟诊断开关 ══
+_LATENCY_DEBUG = True
 
 
 async def dynamic_action_node(state: TicketState) -> TicketState:
@@ -44,6 +52,12 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
     agent._proposals = {}  # v10: 每次迭代都初始化，供 _tool_create_ticket 存储卡片
     user_text = _get_user_text(state)
 
+    # v12-fix: 每次迭代都设置用户身份（self-loop 创建新实例，仅 is_first 设置会丢失）
+    agent._last_user_input = user_text
+    agent._last_user_name = state.get("user_name", "")
+    agent._last_user_role = state.get("role", "employee")
+    agent._last_trace_id = state.get("thread_id", "")
+
     # ================================================================
     # GATE A: 初始化或继续 ReAct
     # ================================================================
@@ -53,10 +67,6 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
 
     if is_first:
         await agent._ensure_inventory_seeded()
-        agent._last_user_input = user_text
-        agent._last_user_name = state.get("user_name", "")
-        agent._last_user_role = state.get("role", "employee")
-        agent._last_trace_id = state.get("thread_id", "")
 
         messages = [
             {"role": "system", "content": agent._build_system_prompt(state.get("user_name", ""))},
@@ -109,7 +119,26 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
         state["resolved"] = True
         state["dynamic_agent_messages"] = []
         state["dynamic_iteration"] = 0
+
+        # v12: 记录执行追踪（超时）
+        TraceStore.record(
+            thread_id=state.get("thread_id", ""),
+            user_name=state.get("user_name", ""),
+            user_input=user_text,
+            track="dynamic",
+            iterations=iteration,
+            steps=trace_steps,
+            final_response=state["final_response"],
+            success=False,
+            error="达到最大迭代次数",
+        )
+
         return state
+
+    # v12: 执行步骤收集器（存储于 state，跨 self-loop 持久化）
+    if is_first:
+        state["_trace_steps"] = []
+    trace_steps = state.setdefault("_trace_steps", [])
 
     logger.info(f"[DynamicAction:v9] 迭代 {iteration + 1}/{agent.MAX_REACT_ITERATIONS}")
 
@@ -123,7 +152,10 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
     writer(f"[REACT]{thought_event}")
 
     try:
+        _t_llm = _time.time()
         response = await agent.llm_with_tools.ainvoke(messages)
+        if _LATENCY_DEBUG:
+            logger.info(f"[⏱️ LATENCY] DynamicAction LLM调用 (iter={iteration + 1}): {_time.time() - _t_llm:.2f}s, tool_calls={len(response.tool_calls) if response.tool_calls else 0}")
     except Exception as e:
         logger.error(f"[DynamicAction:v9] LLM 调用失败: {e}")
         state["final_response"] = "抱歉，处理请求时出现问题。请稍后重试。"
@@ -161,6 +193,19 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
         state["resolved"] = True
         state["dynamic_agent_messages"] = []
         state["dynamic_iteration"] = 0
+
+        # v12: 记录执行追踪
+        TraceStore.record(
+            thread_id=state.get("thread_id", ""),
+            user_name=state.get("user_name", ""),
+            user_input=user_text,
+            track="dynamic",
+            iterations=iteration + 1,
+            steps=trace_steps,
+            final_response=final_answer,
+            success=True,
+        )
+
         return state
 
     # ================================================================
@@ -168,13 +213,81 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
     # ================================================================
     thought = response.content[:200] if response.content else ""
 
-    for i, tool_call in enumerate(response.tool_calls):
-        tool_name = tool_call.get("name", "")
-        tool_args = tool_call.get("args", {})
-        if isinstance(tool_args, str):
-            tool_args = json.loads(tool_args)
+    # v16: 预处理所有 tool_calls（解析 args）
+    _parsed_calls = []
+    for i, tc in enumerate(response.tool_calls):
+        _name = tc.get("name", "")
+        _args = tc.get("args", {})
+        if isinstance(_args, str):
+            try:
+                _args = json.loads(_args)
+            except (json.JSONDecodeError, TypeError):
+                _args = {"_raw": _args}
+        if not isinstance(_args, dict):
+            _args = {"_raw": str(_args)}
+        _parsed_calls.append({
+            "i": i, "name": _name, "args": _args,
+            "call_id": f"call_{iteration}_{_name}_{i}",
+        })
 
-        tool_call_id = f"call_{iteration}_{tool_name}_{i}"
+    # v16: 无 create_ticket 且多个 tool_calls → 并行执行
+    _has_create_ticket = any(c["name"] == "create_ticket" for c in _parsed_calls)
+    if not _has_create_ticket and len(_parsed_calls) > 1:
+        if _LATENCY_DEBUG:
+            logger.info(f"[LATENCY] Parallel tool execution: {len(_parsed_calls)} tools")
+
+        # Push all tool_call events first
+        for c in _parsed_calls:
+            writer(f"[REACT]{json.dumps({'event': 'tool_call', 'text': agent._describe_tool_call(c['name'], c['args']), 'tool': c['name'], 'args': c['args']}, ensure_ascii=False)}")
+
+        # Execute in parallel
+        async def _run_one(c):
+            obs = await agent._execute_tool(c["name"], c["args"])
+            obs_summary = agent._summarize_observation(c["name"], obs)
+            return {**c, "observation": obs, "obs_summary": obs_summary}
+
+        _results = await asyncio.gather(*[_run_one(c) for c in _parsed_calls])
+
+        # Process results in original order
+        for c in _results:
+            writer(f"[REACT]{json.dumps({'event': 'tool_result', 'text': c['obs_summary'], 'tool': c['name']}, ensure_ascii=False)}")
+            obs_data = {}
+            try:
+                obs_data = json.loads(c["observation"]) if isinstance(c["observation"], str) else c["observation"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+            trace_steps.append({
+                "step": len(trace_steps) + 1,
+                "tool": c["name"],
+                "args_summary": agent._describe_tool_call(c["name"], c["args"])[:100],
+                "result_summary": c["obs_summary"][:120],
+                "success": not (isinstance(obs_data, dict) and obs_data.get("error")),
+            })
+            messages.append({
+                "role": "assistant", "content": thought,
+                "tool_calls": [{
+                    "id": c["call_id"], "type": "function",
+                    "function": {"name": c["name"], "arguments": json.dumps(c["args"], ensure_ascii=False)},
+                }],
+            })
+            messages.append({
+                "role": "tool", "tool_call_id": c["call_id"],
+                "content": c["observation"] if isinstance(c["observation"], str) else json.dumps(c["observation"], ensure_ascii=False),
+            })
+
+        # Continue self-loop (no create_ticket, no interrupt)
+        state["dynamic_agent_messages"] = messages
+        state["dynamic_iteration"] = iteration + 1
+        state["resolved"] = False
+        logger.info(f"[DynamicAction:v16] Parallel done — {len(_results)} tools, iter={iteration + 1}")
+        return state
+
+    # v16: 串行路径（单个 tool_call 或含 create_ticket）
+    for c in _parsed_calls:
+        tool_name = c["name"]
+        tool_args = c["args"]
+        tool_call_id = c["call_id"]
+        i = c["i"]
 
         # 推送: 工具调用
         tool_call_event = json.dumps({
@@ -186,7 +299,10 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
         writer(f"[REACT]{tool_call_event}")
 
         # 执行工具
+        _t_tool = _time.time()
         observation = await agent._execute_tool(tool_name, tool_args)
+        if _LATENCY_DEBUG:
+            logger.info(f"[⏱️ LATENCY] 工具 {tool_name}: {_time.time() - _t_tool:.2f}s")
 
         # 推送: 工具结果
         obs_summary = agent._summarize_observation(tool_name, observation)
@@ -196,6 +312,20 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
             "tool": tool_name,
         }, ensure_ascii=False)
         writer(f"[REACT]{tool_result_event}")
+
+        # v12: 收集步骤追踪
+        obs_data = {}
+        try:
+            obs_data = json.loads(observation) if isinstance(observation, str) else observation
+        except (json.JSONDecodeError, TypeError):
+            pass
+        trace_steps.append({
+            "step": len(trace_steps) + 1,
+            "tool": tool_name,
+            "args_summary": agent._describe_tool_call(tool_name, tool_args)[:100],
+            "result_summary": obs_summary[:120],
+            "success": not (isinstance(obs_data, dict) and obs_data.get("error")),
+        })
 
         # 追加 assistant 消息（含 tool_call）
         messages.append({
@@ -247,6 +377,19 @@ async def dynamic_action_node(state: TicketState) -> TicketState:
                     f"iter={iteration}, tool_call_id={tool_call_id}"
                 )
                 # ★ 不在这里 interrupt() — 由 dynamic_interrupt_node 统一处理
+
+                # v12: 记录执行追踪（中断等待确认）
+                TraceStore.record(
+                    thread_id=state.get("thread_id", ""),
+                    user_name=state.get("user_name", ""),
+                    user_input=user_text,
+                    track="dynamic",
+                    iterations=iteration + 1,
+                    steps=trace_steps,
+                    final_response=f"等待确认: {card.get('title', '?')}",
+                    success=True,
+                )
+
                 return state
 
         # 非 create_ticket / 非 proposed → 正常追加 tool result

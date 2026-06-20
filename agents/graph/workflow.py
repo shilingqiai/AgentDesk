@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time as _time
 from typing import AsyncGenerator
 
 from langgraph.graph import StateGraph, END
@@ -37,6 +38,9 @@ from agents.graph.nodes.dynamic import (
 from agents.graph.nodes.terminal import clarification_node, respond_node
 
 logger = logging.getLogger("graph.workflow")
+
+# ══ 延迟诊断开关 ══
+_LATENCY_DEBUG = True
 
 
 # ============================================================
@@ -117,6 +121,7 @@ async def _classify_dynamic_response(
         llm = create_chat_model(model_type="main", temperature=0)
         llm_with_tool = llm.bind_tools([classify_tool], tool_choice="auto")
 
+        _t_llm = _time.time()
         response = await llm_with_tool.ainvoke([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": (
@@ -125,6 +130,8 @@ async def _classify_dynamic_response(
                 f"请调用 classify_intent 函数分类用户意图。"
             )},
         ])
+        if _LATENCY_DEBUG:
+            logger.info(f"[⏱️ LATENCY] ClassifyDynamic LLM调用: {_time.time() - _t_llm:.2f}s")
 
         if response.tool_calls:
             args = response.tool_calls[0].get("args", {})
@@ -345,12 +352,19 @@ class OrchestrationWorkflowRunner:
                                             user_name=user_name, role=role)
         config = {"configurable": {"thread_id": thread_id}}
 
+        _t0 = _time.time()
         try:
             # ── 懒加载 checkpointer + 编译图 ──
+            _t_checkpoint = _time.time()
             await self._ensure_app()
+            if _LATENCY_DEBUG:
+                logger.info(f"[⏱️ LATENCY] _ensure_app (checkpointer): {_time.time() - _t_checkpoint:.2f}s")
 
             # ── 从 checkpointer 恢复状态 ──
+            _t_restore = _time.time()
             prev = await asyncio.to_thread(self.app.get_state, config)
+            if _LATENCY_DEBUG:
+                logger.info(f"[⏱️ LATENCY] get_state (checkpoint restore): {_time.time() - _t_restore:.2f}s")
         except Exception as e:
             logger.error(f"[Stream] 初始化/恢复状态失败: {e}", exc_info=True)
             yield f"[ERROR] 会话初始化失败: {str(e)[:120]}\n"
@@ -514,6 +528,10 @@ class OrchestrationWorkflowRunner:
         # ================================================================
         yield "[THINKING] 🔍 正在分析您的问题...\n"
 
+        _t_graph_start = _time.time()
+        _node_timings = {}  # track per-node timing
+        _last_node = None
+        _last_node_time = _t_graph_start
         try:
             async for event in self.app.astream(
                 initial_state, config, stream_mode=["updates", "custom"],
@@ -531,12 +549,32 @@ class OrchestrationWorkflowRunner:
                         continue
                     elif mode == "updates":
                         for node_name, node_state in data.items():
+                            _now = _time.time()
+                            if _LATENCY_DEBUG and _last_node:
+                                _node_timings[_last_node] = _now - _last_node_time
+                            _last_node = node_name
+                            _last_node_time = _now
+                            if _LATENCY_DEBUG:
+                                logger.info(f"[⏱️ LATENCY] ▶ node={node_name} (graph总耗时={_now - _t_graph_start:.2f}s)")
                             for _y in _yield_stream_event(node_name, node_state):
                                 yield _y
                 else:
                     for node_name, node_state in event.items():
+                        _now = _time.time()
+                        if _LATENCY_DEBUG and _last_node:
+                            _node_timings[_last_node] = _now - _last_node_time
+                        _last_node = node_name
+                        _last_node_time = _now
+                        if _LATENCY_DEBUG:
+                            logger.info(f"[⏱️ LATENCY] ▶ node={node_name} (graph总耗时={_now - _t_graph_start:.2f}s)")
                         for _y in _yield_stream_event(node_name, node_state):
                             yield _y
+
+            # Final node timing
+            if _LATENCY_DEBUG and _last_node:
+                _node_timings[_last_node] = _time.time() - _last_node_time
+                logger.info(f"[⏱️ LATENCY] 📊 各节点耗时: {json.dumps({k: f'{v:.2f}s' for k, v in _node_timings.items()}, ensure_ascii=False)}")
+                logger.info(f"[⏱️ LATENCY] 📊 graph总耗时={_time.time() - _t_graph_start:.2f}s")
 
             # v8: 检查 graph 是否被 interrupt() 冻结
             final_state = await asyncio.to_thread(self.app.get_state, config)
