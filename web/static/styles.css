@@ -588,6 +588,7 @@ body {
     display: flex;
     align-items: center;
     gap: 6px;
+    -webkit-user-select: none;
     user-select: none;
     border-bottom: 1px solid var(--border);
 }
@@ -758,6 +759,7 @@ body {
     display: flex;
     align-items: center;
     gap: 6px;
+    -webkit-user-select: none;
     user-select: none;
     border-bottom: 1px solid var(--border);
 }
@@ -957,10 +959,11 @@ body {
 .badge-priority.P0, .badge-priority.P1 { background: rgba(225,112,85,0.1); color: var(--danger); }
 .badge-status { color: #fff; }
 .badge-status.created { background: #74b9ff; }
-.badge-status.assigned { background: #fdcb6e; color: #333; }
+.badge-status.pending_approval { background: #fdcb6e; color: #333; }
+.badge-status.approved { background: #a29bfe; }
+.badge-status.rejected { background: #e17055; }
 .badge-status.processing { background: #6c5ce7; }
-.badge-status.resolved { background: #00b894; }
-.badge-status.closed { background: #636e72; }
+.badge-status.completed { background: #00b894; }
 
 /* ---------- Ticket Detail (expanded) ---------- */
 .ticket-detail {

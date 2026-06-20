@@ -17,6 +17,10 @@
         return window.currentIdentity || '王经理';
     }
 
+    function getUser() {
+        return currentApprover();
+    }
+
     // ============================================================
     // 数据加载
     // ============================================================
@@ -105,7 +109,8 @@
                 '<span style="cursor:pointer;color:var(--accent);" onclick="window.approvalShowTrail(' + item.ticket_id + ')">' +
                 '<i class="fas fa-project-diagram"></i> 查看审批轨迹</span>' +
                 '</div></div>' +
-                '<div class="approval-actions">' +
+                '<div class="approval-actions" style="display:flex;align-items:center;gap:6px;">' +
+                '<input type="checkbox" class="approval-checkbox" value="' + item.step_id + '" style="cursor:pointer;" title="选择此项">' +
                 '<button class="btn success" onclick="window.approvalApprove(' + item.step_id + ')">' +
                 '<i class="fas fa-check"></i> 通过</button>' +
                 '<button class="btn danger" onclick="window.openRejectModal(' + item.step_id + ')">' +
@@ -181,13 +186,13 @@
         var el = document.getElementById('reject-comment');
         if (el) el.value = '';
         el = document.getElementById('reject-modal');
-        if (el) el.style.display = '';
+        if (el) el.classList.add('open');
     }
 
     function closeRejectModal() {
         rejectTarget = null;
         var el = document.getElementById('reject-modal');
-        if (el) el.style.display = 'none';
+        if (el) el.classList.remove('open');
     }
 
     async function confirmReject() {
@@ -326,6 +331,36 @@
         await loadPending();
     }
 
+    // ── 批量审批 ──
+    async function batchApprove() {
+        var checkboxes = document.querySelectorAll('.approval-checkbox:checked');
+        if (checkboxes.length === 0) {
+            showToast('请至少选择一项审批', 'error');
+            return;
+        }
+        var stepIds = Array.from(checkboxes).map(function(cb) { return parseInt(cb.value); });
+        try {
+            var res = await fetch('/api/approvals/batch-approve', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({step_ids: stepIds, approver_name: getUser()}),
+            });
+            var data = await res.json();
+            if (res.ok && data.success) {
+                showToast('批量通过 ' + data.results.success.length + ' 项'
+                    + (data.results.failed.length ? '，' + data.results.failed.length + ' 项失败' : ''),
+                    'success');
+                await loadPending();
+            } else {
+                showToast(data.detail || '批量审批失败', 'error');
+            }
+        } catch(e) { showToast('请求失败: ' + e.message, 'error'); }
+    }
+
+    function toggleSelectAll(checked) {
+        document.querySelectorAll('.approval-checkbox').forEach(function(cb) { cb.checked = checked; });
+    }
+
     // Expose to global
     window.approvalApprove = approveItem;
     window.approvalShowTrail = showTrail;
@@ -333,4 +368,6 @@
     window.closeRejectModal = closeRejectModal;
     window.confirmReject = confirmReject;
     window.initApprovals = initApprovals;
+    window.batchApprove = batchApprove;
+    window.toggleSelectAll = toggleSelectAll;
 })();

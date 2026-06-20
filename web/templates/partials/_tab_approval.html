@@ -19,6 +19,15 @@
     <!-- ═══ 可操作审批 ═══ -->
     <div id="actionable-section">
         <div class="section-title">🔔 待处理 <span class="tag-your-turn" style="font-size:11px;">你的环节</span></div>
+        <!-- Batch Action Bar -->
+        <div id="batch-actions" style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+            <label style="cursor:pointer;font-size:12px;">
+                <input type="checkbox" onchange="window.toggleSelectAll(this.checked)"> 全选
+            </label>
+            <button class="btn success" onclick="window.batchApprove()" style="font-size:12px;">
+                <i class="fas fa-check-double"></i> 批量通过
+            </button>
+        </div>
         <div id="actionable-list"></div>
     </div>
 
@@ -43,7 +52,7 @@
 </div>
 
 <!-- Reject Modal -->
-<div class="modal-overlay" id="reject-modal" style="display:none;">
+<div class="modal-overlay" id="reject-modal">
     <div class="modal">
         <h3>驳回工单</h3>
         <textarea id="reject-comment" placeholder="驳回理由（可选）..." style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);font-family:inherit;font-size:13px;resize:vertical;min-height:60px;"></textarea>

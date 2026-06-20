@@ -171,9 +171,9 @@ class TestApprovalWorkflowE2E:
         assert result["workflow_status"] == "approved"
         assert result["next_step"] is None
 
-        # 验证工单状态已推进（通过审批 → approved）
+        # v14: 请假审批通过即完成 (APPROVED → COMPLETED)
         db.refresh(ticket)
-        assert ticket.status == "approved"
+        assert ticket.status == "completed"
 
     def test_reject_stops_workflow(self, db, ticket):
         """驳回任一步 → workflow rejected"""
@@ -346,7 +346,8 @@ class TestOrderToApprovalIntegration:
 
         db_ticket = db.ticket.get_by_number(exec_result["ticket_number"])
         assert db_ticket is not None
-        assert db_ticket["status"] == "created"
+        # v14: 无需审批的 admin 工单自动 CREATED → PROCESSING
+        assert db_ticket["status"] == "processing"
         assert db_ticket["requester_name"] == "张三"
 
     @pytest.mark.asyncio

@@ -327,7 +327,8 @@ class TestProposeExecuteLifecycle:
             exec_result["ticket_number"]
         )
         assert db_ticket is not None
-        assert db_ticket["status"] == "created"
+        # v14: 无需审批的 admin 工单自动 CREATED → PROCESSING
+        assert db_ticket["status"] == "processing"
         assert db_ticket["requester_name"] == "张三"
 
 

@@ -222,6 +222,14 @@ class ApprovalEngine:
                     comment=f"全部审批通过 (共 {workflow.total_steps} 步)",
                     db_session=db_session,
                 )
+                # 审批流程走完 → 直接完成（Admin 不参与流程，仅展示）
+                WorkflowService.transition(
+                    ticket_id=ticket.id,
+                    to_status=TicketStatus.COMPLETED,
+                    comment="审批完成，工单已结",
+                    db_session=db_session,
+                )
+                ticket.status = TicketStatus.COMPLETED.value
                 ticket.current_approver = ""
                 _append_ticket_history(ticket, "approved", step.approver,
                                        f"全部审批通过 (共 {workflow.total_steps} 步)")

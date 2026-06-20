@@ -151,6 +151,56 @@ async def get_ticket_stats():
         raise HTTPException(status_code=500, detail=f"获取统计失败: {str(e)}")
 
 
+@router.get("/updates", summary="查询工单状态更新计数（员工通知轮询）")
+async def get_ticket_updates(
+    user_name: str = Query(..., description="员工姓名"),
+    since: Optional[str] = Query(default=None, description="ISO时间戳，只查此时间之后的更新"),
+):
+    """
+    返回该员工工单的状态变更计数。
+
+    供前端轮询使用：每 15s 查询一次，只用 since 参数做增量查询。
+    """
+    from db.models import Ticket
+    from datetime import datetime as dt, timezone
+
+    db = DatabaseRouter()
+    try:
+        session = db.session_manager.Session()
+        query = session.query(Ticket).filter(
+            Ticket.requester_name == user_name,
+            Ticket.is_active == 1,
+        )
+        if since:
+            try:
+                since_dt = dt.fromisoformat(since.replace("Z", "+00:00"))
+                query = query.filter(Ticket.updated_at > since_dt)
+            except (ValueError, TypeError):
+                pass
+
+        tickets = query.all()
+
+        # 按状态统计
+        by_status = {}
+        for t in tickets:
+            s = t.status
+            by_status[s] = by_status.get(s, 0) + 1
+
+        total_updates = sum(by_status.values())
+        last_updated = max((t.updated_at for t in tickets), default=None)
+
+        return {
+            "status": "success",
+            "data": {
+                "total_updates": total_updates,
+                "by_status": by_status,
+                "last_updated_at": last_updated.isoformat() if last_updated else None,
+            },
+        }
+    finally:
+        db.close()
+
+
 @router.get("/{ticket_id}", summary="获取工单详情")
 async def get_ticket(ticket_id: int):
     """按 ID 获取单条工单"""
@@ -379,7 +429,26 @@ async def reject_ticket(
         payload["rejected_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         payload["reject_reason"] = reason or "未提供理由"
 
-        db.ticket.update_ticket(ticket_id, status=TicketStatus.REJECTED.value, payload=payload)
+        # 使用 WorkflowService 校验并执行状态转换
+        from services.workflow_service import WorkflowService
+        from db.models import Ticket as TicketModel
+        db_session2 = db.session_manager.Session()
+        try:
+            # 在同一 session 中先更新 payload
+            t = db_session2.query(TicketModel).filter(TicketModel.id == ticket_id).first()
+            if t:
+                t.payload = payload
+            WorkflowService.transition(
+                ticket_id=ticket_id,
+                to_status=TicketStatus.REJECTED,
+                comment=reason or "管理员驳回",
+                db_session=db_session2,
+            )
+        except ValueError:
+            # 状态转换不合法（如已在终态），降级到直接的 DB 更新
+            db.ticket.update_ticket(ticket_id, status=TicketStatus.REJECTED.value, payload=payload)
+        finally:
+            db_session2.close()
 
         return {
             "status": "success",

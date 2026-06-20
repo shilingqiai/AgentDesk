@@ -87,8 +87,8 @@
                         :class="{ active: activeTab === tab.key }"
                         @click="switchTab(tab.key)">
                     <span x-text="tab.label"></span>
-                    <span class="approval-dot" x-show="tab.key === 'approval' && pendingApprovalCount > 0"
-                          :title="pendingApprovalCount + ' 待审批'"></span>
+                    <span class="approval-dot" x-show="(tab.key === 'approval' && pendingApprovalCount > 0) || (tab.key === 'tickets' && ticketUpdateCount > 0)"
+                          :title="tab.key === 'approval' ? pendingApprovalCount + ' 待审批' : ticketUpdateCount + ' 条工单更新'"></span>
                 </button>
             </template>
         </nav>
@@ -147,6 +147,11 @@ document.addEventListener('alpine:init', () => {
         pendingApprovalCount: 0,
         approvalPollTimer: null,
         _lastApprovalCount: -1,
+        // 员工工单更新通知
+        ticketUpdateCount: 0,
+        ticketPollTimer: null,
+        _lastTicketUpdateCount: -1,
+        _lastTicketPollTime: null,
 
         get visibleTabs() {
             return getVisibleTabs(this.identity);
@@ -192,6 +197,13 @@ document.addEventListener('alpine:init', () => {
             if (visible.find(t => t.key === 'approval')) {
                 this.startApprovalPolling();
             }
+
+            // 5b. 重启工单轮询
+            this.stopTicketPolling();
+            this.ticketUpdateCount = 0;
+            this._lastTicketUpdateCount = -1;
+            this._lastTicketPollTime = null;
+            this.startTicketPolling();
 
             // 6. 刷新当前 Tab
             this.onTabChange();
@@ -280,6 +292,49 @@ document.addEventListener('alpine:init', () => {
         },
 
         // ============================================================
+        // 员工工单轮询（15s，所有角色）
+        // ============================================================
+        startTicketPolling() {
+            if (this.ticketPollTimer) return;
+            // 首次立即检查
+            this._pollTickets();
+            // 之后每 15s 轮询
+            this.ticketPollTimer = setInterval(() => this._pollTickets(), 15000);
+        },
+
+        stopTicketPolling() {
+            if (this.ticketPollTimer) {
+                clearInterval(this.ticketPollTimer);
+                this.ticketPollTimer = null;
+            }
+        },
+
+        async _pollTickets() {
+            try {
+                var params = 'user_name=' + encodeURIComponent(this.identity);
+                if (this._lastTicketPollTime) {
+                    params += '&since=' + encodeURIComponent(this._lastTicketPollTime);
+                }
+                var res = await fetch('/api/tickets/updates?' + params);
+                var data = await res.json();
+                if (data.status === 'success' && data.data) {
+                    this._lastTicketPollTime = data.data.last_updated_at || new Date().toISOString();
+                    var count = data.data.total_updates || 0;
+
+                    // 新增通知
+                    if (count > this.ticketUpdateCount && this._lastTicketUpdateCount >= 0) {
+                        var delta = count - this.ticketUpdateCount;
+                        if (delta > 0) {
+                            showToast('\u{1F4CB} ' + delta + ' 条工单状态已更新', 'info', 4000);
+                        }
+                    }
+                    this._lastTicketUpdateCount = this.ticketUpdateCount;
+                    this.ticketUpdateCount = count;
+                }
+            } catch (e) { /* 静默失败 */ }
+        },
+
+        // ============================================================
         // 初始化
         // ============================================================
         init() {
@@ -297,6 +352,9 @@ document.addEventListener('alpine:init', () => {
                 this.startApprovalPolling();
             }
 
+            // 所有角色启动工单状态轮询（员工也能看到工单更新红点）
+            this.startTicketPolling();
+
             // 初始化当前可见 Tab
             this.onTabChange();
         },
@@ -304,6 +362,7 @@ document.addEventListener('alpine:init', () => {
         // 组件销毁时清理
         destroy() {
             this.stopApprovalPolling();
+            this.stopTicketPolling();
             window.removeEventListener('approval-count', () => {});
         },
     }));
@@ -314,6 +373,7 @@ window.addEventListener('beforeunload', () => {
     const shell = document.querySelector('[x-data="spaApp()"]');
     if (shell && shell._x_dataStack && shell._x_dataStack[0]) {
         shell._x_dataStack[0].stopApprovalPolling();
+        shell._x_dataStack[0].stopTicketPolling();
     }
 });
 

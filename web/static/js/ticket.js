@@ -37,8 +37,8 @@ document.addEventListener('alpine:init', () => {
                         const d = data.data;
                         this.stats = {
                             total: d.total || 0,
-                            open: (d.by_status?.created || 0) + (d.by_status?.assigned || 0) + (d.by_status?.processing || 0),
-                            resolved: (d.by_status?.resolved || 0) + (d.by_status?.closed || 0),
+                            open: (d.by_status?.created || 0) + (d.by_status?.pending_approval || 0) + (d.by_status?.approved || 0) + (d.by_status?.processing || 0),
+                            resolved: (d.by_status?.completed || 0) + (d.by_status?.rejected || 0),
                             high_priority: (d.by_priority?.P0 || 0) + (d.by_priority?.P1 || 0),
                         };
                     }
@@ -139,8 +139,9 @@ document.addEventListener('alpine:init', () => {
                 admin: { icon: 'fa-box', label: '行政', color: '#6c5ce7' },
             },
             STATUS_LABELS: {
-                created: '待处理', assigned: '已派发',
-                processing: '处理中', resolved: '已解决', closed: '已关闭',
+                created: '待处理', pending_approval: '待审批',
+                approved: '已通过', rejected: '已驳回',
+                processing: '处理中', completed: '已完成',
             },
 
             getTypeIcon(type) { return this.TYPE_CONFIG[type]?.icon || 'fa-file-alt'; },

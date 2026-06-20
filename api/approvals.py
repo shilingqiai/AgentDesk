@@ -22,6 +22,11 @@ class RejectRequest(BaseModel):
     approver_name: str = Field(default="", description="操作人姓名（用于权限校验）")
 
 
+class BatchApproveRequest(BaseModel):
+    step_ids: list[int]
+    approver_name: str = Field(default="", description="操作人姓名（用于权限校验）")
+
+
 def _get_db():
     """获取数据库 session"""
     from db.db_router import DatabaseRouter
@@ -94,6 +99,39 @@ async def reject(req: RejectRequest):
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.post("/batch-approve")
+async def batch_approve(req: BatchApproveRequest):
+    """批量通过审批节点"""
+    from services.approval_engine import ApprovalEngine
+    from db.models import ApprovalStep
+
+    if not req.step_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一个审批项")
+
+    db = _get_db()
+    results = {"success": [], "failed": []}
+    try:
+        for step_id in req.step_ids:
+            try:
+                step = db.query(ApprovalStep).filter(ApprovalStep.id == step_id).first()
+                if not step:
+                    results["failed"].append({"step_id": step_id, "reason": "节点不存在"})
+                    continue
+                result = ApprovalEngine.approve_step(
+                    workflow_id=step.workflow_id,
+                    step_order=step.step_order,
+                    comment="批量通过",
+                    approver_name=req.approver_name,
+                    db_session=db,
+                )
+                results["success"].append({"step_id": step_id, **result})
+            except (PermissionError, ValueError) as e:
+                results["failed"].append({"step_id": step_id, "reason": str(e)})
+        return {"success": True, "results": results}
     finally:
         db.close()
 

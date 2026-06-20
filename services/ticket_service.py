@@ -71,7 +71,10 @@ class TicketService:
             svc = (payload or {}).get("service_type", "")
             if "采购" in svc or "procurement" in svc.lower():
                 return cls._APPROVAL_CHAINS.get("purchase", [])
-        # IT 故障等不需要审批
+        if ticket_type in ("it_fault",):
+            # IT 故障报修：无需审批，工单创建后自动进入处理阶段
+            return []
+        # 其他未知类型不需要审批
         return []
 
     @classmethod
@@ -188,6 +191,19 @@ class TicketService:
                         db_session=db_session2,
                     )
                     ticket["status"] = TicketStatus.PENDING_APPROVAL.value
+                finally:
+                    db_session2.close()
+            elif not approver_chain:
+                # 无需审批的类型 (IT故障等): CREATED → PROCESSING (自动进入处理阶段)
+                db_session2 = db.session_manager.Session()
+                try:
+                    WorkflowService.transition(
+                        ticket_id=ticket["id"],
+                        to_status=TicketStatus.PROCESSING,
+                        comment="无需审批，自动进入处理阶段",
+                        db_session=db_session2,
+                    )
+                    ticket["status"] = TicketStatus.PROCESSING.value
                 finally:
                     db_session2.close()
 

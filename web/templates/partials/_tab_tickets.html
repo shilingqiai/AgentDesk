@@ -23,10 +23,11 @@
         <select x-model="filters.status" @change="applyFilters()" class="btn" style="font-size:12px;">
             <option value="">全部状态</option>
             <option value="created">待处理</option>
-            <option value="assigned">已派发</option>
+            <option value="pending_approval">待审批</option>
+            <option value="approved">已通过</option>
+            <option value="rejected">已驳回</option>
             <option value="processing">处理中</option>
-            <option value="resolved">已解决</option>
-            <option value="closed">已关闭</option>
+            <option value="completed">已完成</option>
         </select>
         <button class="btn" @click="loadTickets()" style="font-size:12px;margin-left:auto;">
             <i class="fas fa-sync-alt"></i> 刷新
@@ -75,7 +76,7 @@
                 <!-- Status update buttons (admin only) -->
                 <div x-show="isAdmin" style="margin-top:12px;display:flex;gap:8px;">
                     <button class="btn success" @click="updateStatus(ticket.id, 'processing')">标记处理中</button>
-                    <button class="btn primary" @click="updateStatus(ticket.id, 'resolved')">标记已解决</button>
+                    <button class="btn primary" @click="updateStatus(ticket.id, 'completed')">标记已完成</button>
                 </div>
             </div>
         </div>

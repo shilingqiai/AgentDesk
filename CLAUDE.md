@@ -65,6 +65,16 @@
 - 独立诊断脚本: `python scripts/latency_test.py` (LLM + Embedding + 全流水线)
 - 生产环境模型: `LLM_MODEL=qwen-plus` (非 max/preview 推理模型)
 
+### 状态机与审批完成 (v14)
+
+- **状态转换表** (`services/ticket_state.py`): `CREATED→PROCESSING`、`APPROVED→COMPLETED` 已加入 ALLOWED_TRANSITIONS
+- **审批通过即完成**: 所有审批类型（请假/报销/采购）流程走完后自动 `APPROVED→COMPLETED`，Admin 不参与流程仅展示
+- **IT 故障无审批**: 创建后自动 `CREATED→PROCESSING`，需 IT 修复后由 Admin 手动"标记已完成" → `COMPLETED`
+- **批量审批**: `POST /api/approvals/batch-approve` + 前端全选/批量通过 UI
+- **员工通知**: `/api/tickets/updates` 端点（since 增量轮询），15s 间隔，工单 Tab 红点提醒
+- **前端状态标签**: `ticket.js` STATUS_LABELS 与后端 `TicketStatus` 枚举对齐（created/pending_approval/approved/rejected/processing/completed）
+- **驳回**: `openRejectModal` / `closeRejectModal` 使用 CSS class `.modal-overlay.open` 控制显隐（非 inline style）
+
 ### 前端 API 约定
 
 两个 API 族使用**不同的响应字段名**，不要混用：

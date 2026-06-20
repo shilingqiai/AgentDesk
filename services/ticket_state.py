@@ -36,9 +36,9 @@ class TicketStatus(str, Enum):
 # ── 状态转换表 ─────────────────────────────────────────
 
 ALLOWED_TRANSITIONS: dict[TicketStatus, set[TicketStatus]] = {
-    TicketStatus.CREATED:          {TicketStatus.PENDING_APPROVAL},
+    TicketStatus.CREATED:          {TicketStatus.PENDING_APPROVAL, TicketStatus.PROCESSING},
     TicketStatus.PENDING_APPROVAL: {TicketStatus.APPROVED, TicketStatus.REJECTED},
-    TicketStatus.APPROVED:         {TicketStatus.PROCESSING, TicketStatus.REJECTED},
+    TicketStatus.APPROVED:         {TicketStatus.PROCESSING, TicketStatus.COMPLETED, TicketStatus.REJECTED},
     TicketStatus.PROCESSING:       {TicketStatus.COMPLETED},
     TicketStatus.REJECTED:         set(),   # 终态，不可再转换
     TicketStatus.COMPLETED:        set(),   # 终态，不可再转换
